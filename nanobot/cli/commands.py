@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import secrets
 import signal
 from pathlib import Path
 import select
@@ -161,13 +162,19 @@ def onboard():
     from nanobot.utils.helpers import get_workspace_path
     
     config_path = get_config_path()
+
+    def _new_default_config() -> Config:
+        config = Config()
+        if not config.channels.openaiapi.api_key:
+            config.channels.openaiapi.api_key = f"nbk-{secrets.token_urlsafe(24)}"
+        return config
     
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
         console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
         if typer.confirm("Overwrite?"):
-            config = Config()
+            config = _new_default_config()
             save_config(config)
             console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
         else:
@@ -175,7 +182,7 @@ def onboard():
             save_config(config)
             console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
     else:
-        save_config(Config())
+        save_config(_new_default_config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
     
     # Create workspace
@@ -657,6 +664,15 @@ def channels_status():
         "Telegram",
         "✓" if tg.enabled else "✗",
         tg_config
+    )
+
+    # OpenAI API
+    oai = config.channels.openaiapi
+    oai_config = f"http://{oai.host}:{oai.port}"
+    table.add_row(
+        "OpenAI API",
+        "✓" if oai.enabled else "✗",
+        oai_config
     )
 
     # Slack

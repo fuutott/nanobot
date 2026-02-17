@@ -158,6 +158,7 @@ Connect nanobot to your favorite chat platform.
 | Channel | What you need |
 |---------|---------------|
 | **Telegram** | Bot token from @BotFather |
+| **OpenAI API** | HTTP client + optional bearer token |
 | **Discord** | Bot token + Message Content intent |
 | **WhatsApp** | QR code scan |
 | **Feishu** | App ID + App Secret |
@@ -335,6 +336,52 @@ nanobot channels login
 
 # Terminal 2
 nanobot gateway
+```
+
+</details>
+
+<details>
+<summary><b>OpenAI API (HTTP)</b></summary>
+
+Expose nanobot through an OpenAI-compatible endpoint (`/v1/chat/completions`).
+
+**1. Configure**
+
+```json
+{
+  "channels": {
+    "openaiapi": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 18791,
+      "apiKey": "your-channel-key",
+      "allowFrom": ["my-client"]
+    }
+  }
+}
+```
+
+> `apiKey` is optional. When set, clients must send `Authorization: Bearer your-channel-key`.
+> `allowFrom` checks OpenAI `user` field (or client host if `user` is omitted).
+> `model` in incoming requests is accepted for compatibility and ignored for execution; nanobot always uses the provider/model configured in your `config.json`.
+
+**2. Run**
+
+```bash
+nanobot gateway
+```
+
+**3. Call from any OpenAI-compatible client**
+
+```bash
+curl http://localhost:18791/v1/chat/completions \
+  -H "Authorization: Bearer your-channel-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nanobot-agent",
+    "user": "my-client",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
 ```
 
 </details>
@@ -785,7 +832,7 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `tools.restrictToWorkspace` | `false` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
+| `tools.restrictToWorkspace` | `true` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
 | `channels.*.allowFrom` | `[]` (allow all) | Whitelist of user IDs. Empty = allow everyone; non-empty = only listed users can interact. |
 
 

@@ -30,11 +30,17 @@ WORKDIR /app/bridge
 RUN npm install && npm run build
 WORKDIR /app
 
-# Create config directory
-RUN mkdir -p /root/.nanobot
+# Create non-root runtime user and config directory
+RUN useradd --create-home --shell /bin/bash nanobottie && \
+    mkdir -p /home/nanobottie/.nanobot && \
+    chown -R nanobottie:nanobottie /home/nanobottie
+
+ENV HOME=/home/nanobottie
+USER nanobottie
 
 # Gateway default port
 EXPOSE 18790
+EXPOSE 18791
 
 ENTRYPOINT ["nanobot"]
 CMD ["status"]
