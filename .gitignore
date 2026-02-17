@@ -1,12 +1,14 @@
 .assets
 .env
-*.pyc
 dist/
 build/
 docs/
 *.egg-info/
 *.egg
-*.pyc
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
 *.pyo
 *.pyd
 *.pyw
@@ -15,7 +17,6 @@ docs/
 *.pyzz
 .venv/
 venv/
-__pycache__/
 poetry.lock
 .pytest_cache/
 botpy.log

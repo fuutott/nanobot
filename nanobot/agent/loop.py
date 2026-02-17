@@ -59,6 +59,7 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
+        enable_native_web_tools: bool = True,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -73,6 +74,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.enable_native_web_tools = enable_native_web_tools
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -87,6 +89,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            enable_native_web_tools=enable_native_web_tools,
         )
 
         self._running = False
@@ -107,10 +110,13 @@ class AgentLoop:
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-        self.tools.register(WebFetchTool())
-        self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
-        self.tools.register(SpawnTool(manager=self.subagents))
+        if self.enable_native_web_tools:
+            self.tools.register(WebSearchTool(api_key=self.brave_api_key, workspace=self.workspace))
+            self.tools.register(WebFetchTool())
+        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
+        self.tools.register(message_tool)
+        spawn_tool = SpawnTool(manager=self.subagents)
+        self.tools.register(spawn_tool)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
 

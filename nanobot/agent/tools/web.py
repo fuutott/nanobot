@@ -7,6 +7,8 @@ import os
 import random
 import re
 import socket
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
@@ -105,19 +107,18 @@ def _validate_public_target(url: str) -> tuple[bool, str]:
 
 
 def _spoof_headers(url: str) -> dict[str, str]:
-    domain = urlparse(url).hostname or "duckduckgo.com"
     return {
         "User-Agent": random.choice(SPOOFED_USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
-        "Referer": f"https://{domain}/",
-        "Origin": f"https://{domain}",
+        "Referer": "https://duckduckgo.com/",
+        "Origin": "https://duckduckgo.com",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Cache-Control": "max-age=0",
     }
@@ -135,8 +136,23 @@ def _compact_text(text: str) -> str:
     return re.sub(r"\s+", " ", _strip_tags(text)).strip()
 
 
+def _is_valid_result_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        if host.endswith("duckduckgo.com"):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using DuckDuckGo."""
     
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -149,28 +165,65 @@ class WebSearchTool(Tool):
         "required": ["query"]
     }
     
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_results: int = 5,
+        workspace: str | Path | None = None,
+    ):
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
+        self.workspace = Path(workspace).expanduser() if workspace else None
+        self.search_log_path = (
+            self.workspace / "logs" / "web_search.log.jsonl" if self.workspace else None
+        )
 
-    async def _search_brave(self, query: str, n: int) -> list[dict[str, str]]:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                "https://api.search.brave.com/res/v1/web/search",
-                params={"q": query, "count": n},
-                headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+    def _duckduckgo_params(self, query: str, n: int, page: int, safe_search: str) -> dict[str, str]:
+        params: dict[str, str] = {"q": query}
+        if safe_search == "strict":
+            params["p"] = "-1"
+        elif safe_search == "off":
+            params["p"] = "1"
+        if page > 1:
+            params["s"] = str(max((page - 1) * n, 0))
+        return params
+
+    def _append_search_log(self, entry: dict[str, Any]) -> None:
+        if not self.search_log_path:
+            return
+
+        try:
+            self.search_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.search_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _extract_results_regex(self, html_body: str, n: int) -> list[dict[str, str]]:
+        pattern = re.compile(r'\shref="[^"]*(https?[^?&"]+)[^>]*>([^<]*)', flags=re.I)
+        results: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for raw_url, raw_label in pattern.findall(html_body):
+            resolved = unquote(raw_url)
+            if resolved in seen:
+                continue
+            if not _is_valid_result_url(resolved):
+                continue
+
+            title = _compact_text(raw_label) or resolved
+            seen.add(resolved)
+            results.append(
+                {
+                    "title": title,
+                    "url": resolved,
+                    "description": "",
+                }
             )
-            r.raise_for_status()
+            if len(results) >= n:
+                break
 
-        items = r.json().get("web", {}).get("results", [])
-        return [
-            {
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "description": item.get("description", ""),
-            }
-            for item in items[:n]
-        ]
+        return results
 
     async def _search_duckduckgo(
         self,
@@ -180,53 +233,12 @@ class WebSearchTool(Tool):
         safe_search: str,
     ) -> list[dict[str, str]]:
         url = "https://duckduckgo.com/html/"
-        params: dict[str, str] = {"q": query, "s": str(max((page - 1) * n, 0))}
-        if safe_search == "strict":
-            params["p"] = "-1"
-        elif safe_search == "off":
-            params["p"] = "1"
-
+        params = self._duckduckgo_params(query, n, page, safe_search)
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             r = await client.get(url, params=params, headers=_spoof_headers(url))
             r.raise_for_status()
-        html_body = r.text
 
-        patterns = [
-            re.compile(
-                r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-                flags=re.I | re.S,
-            ),
-            re.compile(
-                r'<a[^>]*class="[^"]*result-link[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-                flags=re.I | re.S,
-            ),
-            re.compile(
-                r'<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-                flags=re.I | re.S,
-            ),
-        ]
-        results: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for pattern in patterns:
-            for href, raw_label in pattern.findall(html_body):
-                resolved = _extract_ddg_url(href)
-                if not resolved or resolved in seen:
-                    continue
-                if not resolved.startswith(("http://", "https://")):
-                    continue
-                seen.add(resolved)
-                results.append(
-                    {
-                        "title": _compact_text(raw_label) or resolved,
-                        "url": resolved,
-                        "description": "",
-                    }
-                )
-                if len(results) >= n:
-                    break
-            if len(results) >= n:
-                break
-        return results
+        return self._extract_results_regex(r.text, n)
     
     async def execute(
         self,
@@ -236,20 +248,41 @@ class WebSearchTool(Tool):
         safeSearch: str = "moderate",
         **kwargs: Any,
     ) -> str:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        provider = ""
+        request_payload: dict[str, Any] = {}
+
         try:
             n = min(max(count or self.max_results, 1), 10)
             p = max(page, 1)
             safe = safeSearch if safeSearch in {"strict", "moderate", "off"} else "moderate"
 
             results: list[dict[str, str]] = []
-            if self.api_key:
-                try:
-                    results = await self._search_brave(query, n)
-                except Exception:
-                    # Fall through to DuckDuckGo HTML fallback.
-                    results = []
-            if not results:
-                results = await self._search_duckduckgo(query, n, p, safe)
+            provider = "duckduckgo_html"
+            request_payload = {
+                "method": "GET",
+                "url": "https://duckduckgo.com/html/",
+                "params": self._duckduckgo_params(query, n, p, safe),
+                "headers": "spoofed browser headers",
+            }
+            results = await self._search_duckduckgo(query, n, p, safe)
+
+            self._append_search_log(
+                {
+                    "timestamp": timestamp,
+                    "tool": self.name,
+                    "query": query,
+                    "count": n,
+                    "page": p,
+                    "safeSearch": safe,
+                    "provider": provider,
+                    "request": request_payload,
+                    "response": {
+                        "result_count": len(results),
+                        "results": results,
+                    },
+                }
+            )
 
             if not results:
                 return f"No results for: {query}"
@@ -261,6 +294,19 @@ class WebSearchTool(Tool):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
         except Exception as e:
+            self._append_search_log(
+                {
+                    "timestamp": timestamp,
+                    "tool": self.name,
+                    "query": query,
+                    "count": count,
+                    "page": page,
+                    "safeSearch": safeSearch,
+                    "provider": provider,
+                    "request": request_payload,
+                    "error": str(e),
+                }
+            )
             return f"Error: {e}"
 
 

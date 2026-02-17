@@ -253,7 +253,7 @@ class WebSearchConfig(Base):
 
 class WebToolsConfig(Base):
     """Web tools configuration."""
-
+    enabled: bool = True
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
