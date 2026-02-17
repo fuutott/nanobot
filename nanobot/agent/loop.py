@@ -326,8 +326,16 @@ class AgentLoop:
             asyncio.create_task(self._consolidate_memory(session))
 
         self._set_tool_context(msg.channel, msg.chat_id)
+
+        openai_history = []
+        if msg.channel == "openaiapi" and isinstance(msg.metadata, dict):
+            raw_history = msg.metadata.get("openai_history")
+            if isinstance(raw_history, list):
+                openai_history = [item for item in raw_history if isinstance(item, dict)]
+
+        history = openai_history if openai_history else session.get_history(max_messages=self.memory_window)
         initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+            history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
