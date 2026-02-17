@@ -1,19 +1,34 @@
 """Web tools: web_search and web_fetch."""
 
 import html
+import ipaddress
 import json
 import os
+import random
 import re
+import socket
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 
 from nanobot.agent.tools.base import Tool
 
 # Shared constants
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
+SPOOFED_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 10; SM-M515F) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/87.0.4280.141 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 8.1.0; AX1082) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/83.0.4103.83 Mobile Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/98.0.4758.80 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:97.0) Gecko/20100101 Firefox/97.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36",
+]
 
 
 def _strip_tags(text: str) -> str:
@@ -43,6 +58,83 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _is_private_or_local_ip(ip: ipaddress._BaseAddress) -> bool:
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_public_target(url: str) -> tuple[bool, str]:
+    """Block localhost/private IP targets to reduce SSRF risk."""
+    try:
+        hostname = (urlparse(url).hostname or "").strip().lower()
+        if not hostname:
+            return False, "Missing domain"
+
+        if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(
+            (".localhost", ".local", ".internal")
+        ):
+            return False, f"Blocked local hostname: {hostname}"
+
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if _is_private_or_local_ip(addr):
+                return False, f"Blocked private IP: {hostname}"
+            return True, ""
+        except ValueError:
+            pass
+
+        try:
+            infos = socket.getaddrinfo(hostname, None)
+            for info in infos:
+                resolved_ip = ipaddress.ip_address(info[4][0])
+                if _is_private_or_local_ip(resolved_ip):
+                    return False, f"Blocked private DNS target: {hostname} -> {resolved_ip}"
+        except socket.gaierror:
+            # DNS resolution issues will be handled by the actual request path.
+            pass
+
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _spoof_headers(url: str) -> dict[str, str]:
+    domain = urlparse(url).hostname or "duckduckgo.com"
+    return {
+        "User-Agent": random.choice(SPOOFED_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": f"https://{domain}/",
+        "Origin": f"https://{domain}",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    }
+
+
+def _extract_ddg_url(href: str) -> str:
+    if href.startswith("http://") or href.startswith("https://"):
+        return href
+    parsed = urlparse(href)
+    uddg = parse_qs(parsed.query).get("uddg", [""])[0]
+    return unquote(uddg) if uddg else ""
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"\s+", " ", _strip_tags(text)).strip()
+
+
 class WebSearchTool(Tool):
     """Search the web using Brave Search API."""
     
@@ -60,30 +152,112 @@ class WebSearchTool(Tool):
     def __init__(self, api_key: str | None = None, max_results: int = 5):
         self.api_key = api_key or os.environ.get("BRAVE_API_KEY", "")
         self.max_results = max_results
+
+    async def _search_brave(self, query: str, n: int) -> list[dict[str, str]]:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query, "count": n},
+                headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+            )
+            r.raise_for_status()
+
+        items = r.json().get("web", {}).get("results", [])
+        return [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "description": item.get("description", ""),
+            }
+            for item in items[:n]
+        ]
+
+    async def _search_duckduckgo(
+        self,
+        query: str,
+        n: int,
+        page: int,
+        safe_search: str,
+    ) -> list[dict[str, str]]:
+        url = "https://duckduckgo.com/html/"
+        params: dict[str, str] = {"q": query, "s": str(max((page - 1) * n, 0))}
+        if safe_search == "strict":
+            params["p"] = "-1"
+        elif safe_search == "off":
+            params["p"] = "1"
+
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            r = await client.get(url, params=params, headers=_spoof_headers(url))
+            r.raise_for_status()
+        html_body = r.text
+
+        patterns = [
+            re.compile(
+                r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                flags=re.I | re.S,
+            ),
+            re.compile(
+                r'<a[^>]*class="[^"]*result-link[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                flags=re.I | re.S,
+            ),
+            re.compile(
+                r'<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                flags=re.I | re.S,
+            ),
+        ]
+        results: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            for href, raw_label in pattern.findall(html_body):
+                resolved = _extract_ddg_url(href)
+                if not resolved or resolved in seen:
+                    continue
+                if not resolved.startswith(("http://", "https://")):
+                    continue
+                seen.add(resolved)
+                results.append(
+                    {
+                        "title": _compact_text(raw_label) or resolved,
+                        "url": resolved,
+                        "description": "",
+                    }
+                )
+                if len(results) >= n:
+                    break
+            if len(results) >= n:
+                break
+        return results
     
-    async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        if not self.api_key:
-            return "Error: BRAVE_API_KEY not configured"
-        
+    async def execute(
+        self,
+        query: str,
+        count: int | None = None,
+        page: int = 1,
+        safeSearch: str = "moderate",
+        **kwargs: Any,
+    ) -> str:
         try:
             n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                    timeout=10.0
-                )
-                r.raise_for_status()
-            
-            results = r.json().get("web", {}).get("results", [])
+            p = max(page, 1)
+            safe = safeSearch if safeSearch in {"strict", "moderate", "off"} else "moderate"
+
+            results: list[dict[str, str]] = []
+            if self.api_key:
+                try:
+                    results = await self._search_brave(query, n)
+                except Exception:
+                    # Fall through to DuckDuckGo HTML fallback.
+                    results = []
+            if not results:
+                results = await self._search_duckduckgo(query, n, p, safe)
+
             if not results:
                 return f"No results for: {query}"
             
             lines = [f"Results for: {query}\n"]
             for i, item in enumerate(results[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
-                if desc := item.get("description"):
+                if desc := item.get("description", ""):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
         except Exception as e:
@@ -100,7 +274,14 @@ class WebFetchTool(Tool):
         "properties": {
             "url": {"type": "string", "description": "URL to fetch"},
             "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            "maxChars": {"type": "integer", "minimum": 100}
+            "maxChars": {"type": "integer", "minimum": 100},
+            "maxLinks": {"type": "integer", "minimum": 0, "maximum": 100, "default": 40},
+            "findInPage": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional terms to prioritize excerpt around",
+            },
+            "startIndex": {"type": "integer", "minimum": 0, "default": 0},
         },
         "required": ["url"]
     }
@@ -108,7 +289,110 @@ class WebFetchTool(Tool):
     def __init__(self, max_chars: int = 50000):
         self.max_chars = max_chars
     
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+    async def _safe_get(self, url: str) -> httpx.Response:
+        current_url = url
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for _ in range(MAX_REDIRECTS + 1):
+                is_valid, error_msg = _validate_public_target(current_url)
+                if not is_valid:
+                    raise ValueError(error_msg)
+
+                r = await client.get(
+                    current_url,
+                    headers=_spoof_headers(current_url),
+                    follow_redirects=False,
+                )
+
+                if r.status_code in {301, 302, 303, 307, 308} and "location" in r.headers:
+                    current_url = urljoin(str(r.url), r.headers["location"])
+                    continue
+
+                r.raise_for_status()
+                return r
+
+        raise ValueError(f"Too many redirects (>{MAX_REDIRECTS})")
+
+    def _extract_links(
+        self,
+        body_html: str,
+        page_url: str,
+        max_links: int,
+        search_terms: list[str] | None,
+    ) -> list[list[str]]:
+        links: list[tuple[str, str, float]] = []
+        pattern = re.compile(r'<a\s+[^>]*?href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>', flags=re.I)
+        for index, (raw_href, raw_label) in enumerate(pattern.findall(body_html)):
+            href = urljoin(page_url, raw_href)
+            if not href.startswith(("http://", "https://")):
+                continue
+            label = _compact_text(raw_label)
+            if not label and not href:
+                continue
+
+            ratio = 1 / min(1, max(len(re.findall(r"\d", href)), 1))
+            score = ratio * (100 - (len(label) + len(href) + (20 * index / max(1, len(body_html)))))
+            score += (1 - ratio) * max(1, len(label.split()))
+            for term in search_terms or []:
+                if term and term.lower() in label.lower():
+                    score += 1000
+
+            links.append((label, href, score))
+
+        links.sort(key=lambda x: x[2], reverse=True)
+        unique: list[list[str]] = []
+        seen: set[str] = set()
+        for label, href, _ in links:
+            if href in seen:
+                continue
+            seen.add(href)
+            unique.append([label, href])
+            if len(unique) >= max_links:
+                break
+        return unique
+
+    def _extract_term_snippets(self, content: str, terms: list[str], max_chars: int) -> str:
+        if not terms or max_chars <= 0 or max_chars >= len(content):
+            return content[:max_chars] if max_chars > 0 else content
+
+        pad = max(30, max_chars // max(2, len(terms) * 2))
+        snippets: list[tuple[int, int]] = []
+        lowered = content.lower()
+
+        for term in terms:
+            term = term.strip()
+            if not term:
+                continue
+            idx = lowered.find(term.lower())
+            if idx >= 0:
+                start = max(0, idx - pad)
+                end = min(len(content), idx + len(term) + pad)
+                snippets.append((start, end))
+
+        if not snippets:
+            return content[:max_chars]
+
+        snippets.sort()
+        merged: list[tuple[int, int]] = [snippets[0]]
+        for start, end in snippets[1:]:
+            last_start, last_end = merged[-1]
+            if start <= last_end:
+                merged[-1] = (last_start, max(last_end, end))
+            else:
+                merged.append((start, end))
+
+        out = " ... ".join(content[s:e] for s, e in merged)
+        return out[:max_chars]
+
+    async def execute(
+        self,
+        url: str,
+        extractMode: str = "markdown",
+        maxChars: int | None = None,
+        maxLinks: int = 40,
+        findInPage: list[str] | None = None,
+        startIndex: int = 0,
+        **kwargs: Any,
+    ) -> str:
         from readability import Document
 
         max_chars = maxChars or self.max_chars
@@ -117,17 +401,19 @@ class WebFetchTool(Tool):
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url})
+        is_valid, error_msg = _validate_public_target(url)
+        if not is_valid:
+            return json.dumps({"error": f"URL blocked: {error_msg}", "url": url})
 
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
-                timeout=30.0
-            ) as client:
-                r = await client.get(url, headers={"User-Agent": USER_AGENT})
-                r.raise_for_status()
+            r = await self._safe_get(url)
             
             ctype = r.headers.get("content-type", "")
+            title = ""
+            h1 = ""
+            h2 = ""
+            h3 = ""
+            links: list[list[str]] = []
             
             # JSON
             if "application/json" in ctype:
@@ -135,18 +421,75 @@ class WebFetchTool(Tool):
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
-                text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                extractor = "readability"
+                body_match = re.search(r"<body[^>]*>([\s\S]*?)</body>", r.text, flags=re.I)
+                body_html = body_match.group(1) if body_match else r.text
+                summary_html = doc.summary() or ""
+                body_text = _normalize(_strip_tags(body_html))
+                summary_text = _normalize(_strip_tags(summary_html))
+
+                title = _compact_text(doc.title() or "")
+                h1_match = re.search(r"<h1[^>]*>([\s\S]*?)</h1>", body_html, flags=re.I)
+                h2_match = re.search(r"<h2[^>]*>([\s\S]*?)</h2>", body_html, flags=re.I)
+                h3_match = re.search(r"<h3[^>]*>([\s\S]*?)</h3>", body_html, flags=re.I)
+                h1 = _compact_text(h1_match.group(1)) if h1_match else ""
+                h2 = _compact_text(h2_match.group(1)) if h2_match else ""
+                h3 = _compact_text(h3_match.group(1)) if h3_match else ""
+
+                if extractMode == "markdown":
+                    extract_html = summary_html if len(summary_text) > 120 else body_html
+                    text = self._to_markdown(extract_html)
+                    extractor = "readability"
+                    if len(text) < 200 and len(body_text) > (len(text) * 2):
+                        text = body_text
+                        extractor = "body-text-fallback"
+                else:
+                    # Prefer readability when it yields a substantial extraction,
+                    # otherwise fall back to full body text for dynamic/news pages.
+                    if len(summary_text) >= 200 and len(summary_text) >= int(0.2 * max(1, len(body_text))):
+                        text = summary_text
+                        extractor = "readability"
+                    else:
+                        text = body_text
+                        extractor = "body"
+
+                links = self._extract_links(body_html, str(r.url), max(maxLinks, 0), findInPage)
+
+                if title and extractMode == "markdown":
+                    text = f"# {title}\n\n{text}"
             else:
                 text, extractor = r.text, "raw"
+
+            source_text = text
+            if findInPage:
+                text = self._extract_term_snippets(source_text, findInPage, max_chars)
+                truncated = max_chars > 0 and len(text) < len(source_text)
+            else:
+                start = max(startIndex, 0)
+                if max_chars > 0:
+                    end = start + max_chars
+                    truncated = end < len(source_text)
+                    text = source_text[start:end]
+                else:
+                    text = source_text[start:]
+                    truncated = False
             
-            truncated = len(text) > max_chars
-            if truncated:
-                text = text[:max_chars]
-            
-            return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
-                              "extractor": extractor, "truncated": truncated, "length": len(text), "text": text})
+            payload: dict[str, Any] = {
+                "url": url,
+                "finalUrl": str(r.url),
+                "status": r.status_code,
+                "extractor": extractor,
+                "truncated": truncated,
+                "length": len(text),
+                "text": text,
+                "content": text,
+                "title": title,
+                "h1": h1,
+                "h2": h2,
+                "h3": h3,
+            }
+            if links:
+                payload["links"] = links
+            return json.dumps(payload)
         except Exception as e:
             return json.dumps({"error": str(e), "url": url})
     

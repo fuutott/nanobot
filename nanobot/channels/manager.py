@@ -46,6 +46,17 @@ class ChannelManager:
                 logger.info("Telegram channel enabled")
             except ImportError as e:
                 logger.warning(f"Telegram channel not available: {e}")
+
+        # OpenAI-compatible API channel
+        if self.config.channels.openaiapi.enabled:
+            try:
+                from nanobot.channels.openaiapi import OpenAIAPIChannel
+                self.channels["openaiapi"] = OpenAIAPIChannel(
+                    self.config.channels.openaiapi, self.bus
+                )
+                logger.info("OpenAI API channel enabled")
+            except ImportError as e:
+                logger.warning(f"OpenAI API channel not available: {e}")
         
         # WhatsApp channel
         if self.config.channels.whatsapp.enabled:

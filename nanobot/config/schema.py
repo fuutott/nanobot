@@ -30,6 +30,16 @@ class TelegramConfig(Base):
     proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
 
 
+class OpenAIAPIConfig(Base):
+    """OpenAI-compatible HTTP API channel configuration."""
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 18791
+    api_key: str = ""  # Optional Bearer token required by /v1/chat/completions
+    allow_from: list[str] = Field(default_factory=list)  # Allowed caller identifiers (user field or client host)
+    request_timeout_seconds: int = 120
+
+
 class FeishuConfig(Base):
     """Feishu/Lark channel configuration using WebSocket long connection."""
 
@@ -169,6 +179,7 @@ class ChannelsConfig(Base):
 
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    openaiapi: OpenAIAPIConfig = Field(default_factory=OpenAIAPIConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
     mochat: MochatConfig = Field(default_factory=MochatConfig)
@@ -264,7 +275,7 @@ class ToolsConfig(Base):
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
-    restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
+    restrict_to_workspace: bool = True  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
