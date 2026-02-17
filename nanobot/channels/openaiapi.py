@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from loguru import logger
 import uvicorn
 
@@ -97,15 +99,14 @@ class OpenAIAPIChannel(BaseChannel):
         async def chat_completions(payload: dict[str, Any], request: Request) -> dict[str, Any]:
             self._check_bearer_auth(request)
 
-            if payload.get("stream"):
-                raise HTTPException(status_code=400, detail="stream=true is not supported")
+            stream = bool(payload.get("stream"))
 
             requested_model = str(payload.get("model") or "nanobot-agent")
             messages = payload.get("messages")
             if not isinstance(messages, list) or not messages:
                 raise HTTPException(status_code=400, detail="messages must be a non-empty array")
 
-            prompt = self._extract_prompt(messages)
+            history_messages, prompt = self._normalize_messages_for_agent(messages)
             if not prompt:
                 raise HTTPException(status_code=400, detail="could not extract text prompt from messages")
 
@@ -114,8 +115,11 @@ class OpenAIAPIChannel(BaseChannel):
             if not self.is_allowed(sender_id):
                 raise HTTPException(status_code=403, detail="sender not allowed")
 
-            chat_id = str(payload.get("user") or f"http:{request_id}")
-            metadata = {"request_id": request_id}
+            chat_id = self._chat_id(request, payload)
+            metadata = {
+                "request_id": request_id,
+                "openai_history": history_messages,
+            }
 
             loop = asyncio.get_running_loop()
             fut: asyncio.Future[str] = loop.create_future()
@@ -128,6 +132,69 @@ class OpenAIAPIChannel(BaseChannel):
                 metadata=metadata,
             )
 
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+
+            if stream:
+                logger.debug(
+                    f"openaiapi: accepted model='{requested_model}' (ignored); using configured provider model"
+                )
+
+                async def event_stream() -> Any:
+                    try:
+                        content = await asyncio.wait_for(
+                            fut, timeout=self.config.request_timeout_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        self._pending.pop(request_id, None)
+                        error_chunk = {
+                            "id": completion_id,
+                            "object": "error",
+                            "error": {
+                                "message": "agent response timeout",
+                                "type": "timeout_error",
+                            },
+                        }
+                        yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    now = int(time.time())
+                    first_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": now,
+                        "model": "nanobot-agent",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "role": "assistant",
+                                    "content": content,
+                                },
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(first_chunk, ensure_ascii=False)}\n\n"
+
+                    final_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": now,
+                        "model": "nanobot-agent",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(event_stream(), media_type="text/event-stream")
+
             try:
                 content = await asyncio.wait_for(fut, timeout=self.config.request_timeout_seconds)
             except asyncio.TimeoutError:
@@ -139,7 +206,6 @@ class OpenAIAPIChannel(BaseChannel):
             )
 
             now = int(time.time())
-            completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
             return {
                 "id": completion_id,
@@ -211,6 +277,56 @@ class OpenAIAPIChannel(BaseChannel):
                 return text
 
         return ""
+
+    def _normalize_messages_for_agent(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, str]], str]:
+        """Convert OpenAI chat messages to (history, current_user_prompt) for the agent loop."""
+        normalized: list[dict[str, str]] = []
+
+        for raw in messages:
+            if not isinstance(raw, dict):
+                continue
+
+            role = str(raw.get("role") or "").strip().lower()
+            if role == "developer":
+                role = "system"
+            if role not in {"system", "user", "assistant"}:
+                continue
+
+            text = self._message_text(raw.get("content"))
+            if not text:
+                continue
+
+            normalized.append({"role": role, "content": text})
+
+        if not normalized:
+            return [], ""
+
+        for idx in range(len(normalized) - 1, -1, -1):
+            if normalized[idx]["role"] == "user":
+                history = normalized[:idx]
+                current_prompt = normalized[idx]["content"]
+                return history, current_prompt
+
+        return normalized[:-1], normalized[-1]["content"]
+
+    def _chat_id(self, request: Request, payload: dict[str, Any]) -> str:
+        """Build stable chat_id for session continuity in OpenAI-compatible clients."""
+        user = payload.get("user")
+        if isinstance(user, str) and user.strip():
+            return user.strip()
+
+        for key in ("conversation_id", "session_id", "chat_id"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        for header in ("x-conversation-id", "x-session-id", "x-chat-id"):
+            value = request.headers.get(header, "")
+            if value.strip():
+                return value.strip()
+
+        client = request.client.host if request.client else "http-client"
+        return f"http:{client}"
 
     def _sender_id(self, request: Request, payload: dict[str, Any]) -> str:
         """Build sender identifier for allowlist checks."""
