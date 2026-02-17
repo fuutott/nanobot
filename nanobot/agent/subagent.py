@@ -37,6 +37,7 @@ class SubagentManager:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
+        enable_native_web_tools: bool = True,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -48,6 +49,7 @@ class SubagentManager:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.enable_native_web_tools = enable_native_web_tools
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
     
     async def spawn(
@@ -112,8 +114,9 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
             ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
-            tools.register(WebFetchTool())
+            if self.enable_native_web_tools:
+                tools.register(WebSearchTool(api_key=self.brave_api_key, workspace=self.workspace))
+                tools.register(WebFetchTool())
             
             # Build messages with subagent-specific prompt
             system_prompt = self._build_subagent_prompt(task)

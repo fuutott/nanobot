@@ -375,6 +375,7 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
+        enable_native_web_tools=config.tools.web.enabled,
     )
     
     # Set cron callback (needs agent)
@@ -491,6 +492,7 @@ def agent(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
+        enable_native_web_tools=config.tools.web.enabled,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
