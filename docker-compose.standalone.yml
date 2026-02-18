@@ -1,0 +1,14 @@
+services:
+  nanobot-gateway:
+    container_name: nanobot-gateway
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nanobot
+    command: ["gateway"]
+    restart: unless-stopped
+    ports:
+      - "18790:18790"
+      - "18791:18791"
+    volumes:
+      - ${USERPROFILE}/.nanobot:/home/nanobottie/.nanobot

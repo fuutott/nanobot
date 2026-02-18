@@ -4,6 +4,7 @@ import asyncio
 from contextlib import AsyncExitStack
 import json
 import json_repair
+import mimetypes
 from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable
@@ -43,7 +44,10 @@ class AgentLoop:
         bus: MessageBus,
         provider: LLMProvider,
         workspace: Path,
+        vision_provider: LLMProvider | None = None,
         model: str | None = None,
+        default_text_model: str | None = None,
+        default_vision_model: str | None = None,
         max_iterations: int = 20,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -60,8 +64,11 @@ class AgentLoop:
         from nanobot.cron.service import CronService
         self.bus = bus
         self.provider = provider
+        self.vision_provider = vision_provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.default_text_model = default_text_model or self.model
+        self.default_vision_model = default_vision_model
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -79,7 +86,7 @@ class AgentLoop:
             provider=provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=self.default_text_model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
@@ -172,6 +179,8 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
     ) -> tuple[str | None, list[str]]:
         """
         Run the agent iteration loop.
@@ -187,14 +196,16 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        active_model = model or self.default_text_model
+        active_provider = provider or self.provider
 
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
+            response = await active_provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model,
+                model=active_model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -233,6 +244,23 @@ class AgentLoop:
                 break
 
         return final_content, tools_used
+
+    def _message_has_image_media(self, media: list[str] | None) -> bool:
+        """Return True if any attached media path appears to be an image."""
+        if not media:
+            return False
+        for path in media:
+            mime, _ = mimetypes.guess_type(path)
+            if mime and mime.startswith("image/"):
+                return True
+        return False
+
+    def _select_route_for_message(self, msg: InboundMessage) -> tuple[LLMProvider, str]:
+        """Select provider/model route based on message media."""
+        has_image = self._message_has_image_media(msg.media)
+        if has_image and self.default_vision_model:
+            return (self.vision_provider or self.provider, self.default_vision_model)
+        return self.provider, self.default_text_model
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -341,15 +369,18 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-
         async def _bus_progress(content: str) -> None:
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content,
                 metadata=msg.metadata or {},
             ))
 
+        selected_provider, selected_model = self._select_route_for_message(msg)
         final_content, tools_used = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages,
+            on_progress=on_progress or _bus_progress,
+            provider=selected_provider,
+            model=selected_model,
         )
 
         if final_content is None:
@@ -398,7 +429,11 @@ class AgentLoop:
             channel=origin_channel,
             chat_id=origin_chat_id,
         )
-        final_content, _ = await self._run_agent_loop(initial_messages)
+        final_content, _ = await self._run_agent_loop(
+            initial_messages,
+            provider=self.provider,
+            model=self.default_text_model,
+        )
 
         if final_content is None:
             final_content = "Background task completed."
@@ -471,7 +506,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                     {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                model=self.model,
+                model=self.default_text_model,
             )
             text = (response.content or "").strip()
             if not text:
