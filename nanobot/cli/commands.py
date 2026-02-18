@@ -286,15 +286,33 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config: Config):
-    """Create the appropriate LLM provider from config."""
+def _make_provider(config: Config, model: str | None = None, provider_override: str | None = None):
+    """Create provider from config. Supports explicit model/provider selection."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
+    from nanobot.providers.registry import find_by_name
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
+    model = model or config.agents.defaults.model
+    if provider_override:
+        provider_name = provider_override
+        p = getattr(config.providers, provider_name, None)
+    else:
+        provider_name = config.get_provider_name(model)
+        p = config.get_provider(model)
+
+    if not provider_name:
+        console.print("[red]Error: Could not determine provider.[/red]")
+        raise typer.Exit(1)
+
+    spec = find_by_name(provider_name)
+    if spec is None:
+        console.print(f"[red]Error: Unknown provider '{provider_name}'.[/red]")
+        raise typer.Exit(1)
+
+    if p is None:
+        console.print(f"[red]Error: Provider config '{provider_name}' not found.[/red]")
+        raise typer.Exit(1)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
@@ -307,17 +325,18 @@ def _make_provider(config: Config):
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
             default_model=model,
         )
-
-    from nanobot.providers.registry import find_by_name
-    spec = find_by_name(provider_name)
     if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
 
+    api_base = p.api_base
+    if not api_base and spec.is_gateway and spec.default_api_base:
+        api_base = spec.default_api_base
+
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
-        api_base=config.get_api_base(model),
+        api_base=api_base if provider_override else config.get_api_base(model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
@@ -352,7 +371,20 @@ def gateway(
     
     config = load_config()
     bus = MessageBus()
-    provider = _make_provider(config)
+    text_model = config.agents.defaults.default_text_model or config.agents.defaults.model
+    vision_model = config.agents.defaults.default_vision_model
+    text_provider = _make_provider(
+        config,
+        model=text_model,
+        provider_override=config.agents.defaults.default_text_provider,
+    )
+    vision_provider = None
+    if vision_model:
+        vision_provider = _make_provider(
+            config,
+            model=vision_model,
+            provider_override=config.agents.defaults.default_vision_provider,
+        )
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -362,9 +394,12 @@ def gateway(
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
-        provider=provider,
+        provider=text_provider,
+        vision_provider=vision_provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
+        default_text_model=text_model,
+        default_vision_model=config.agents.defaults.default_vision_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -467,7 +502,20 @@ def agent(
     config = load_config()
     
     bus = MessageBus()
-    provider = _make_provider(config)
+    text_model = config.agents.defaults.default_text_model or config.agents.defaults.model
+    vision_model = config.agents.defaults.default_vision_model
+    text_provider = _make_provider(
+        config,
+        model=text_model,
+        provider_override=config.agents.defaults.default_text_provider,
+    )
+    vision_provider = None
+    if vision_model:
+        vision_provider = _make_provider(
+            config,
+            model=vision_model,
+            provider_override=config.agents.defaults.default_vision_provider,
+        )
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -480,9 +528,12 @@ def agent(
     
     agent_loop = AgentLoop(
         bus=bus,
-        provider=provider,
+        provider=text_provider,
+        vision_provider=vision_provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
+        default_text_model=text_model,
+        default_vision_model=config.agents.defaults.default_vision_model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -1005,6 +1056,14 @@ def status():
         from nanobot.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
+        if config.agents.defaults.default_text_model:
+            console.print(f"Default text model: {config.agents.defaults.default_text_model}")
+        if config.agents.defaults.default_vision_model:
+            console.print(f"Default vision model: {config.agents.defaults.default_vision_model}")
+        if config.agents.defaults.default_text_provider:
+            console.print(f"Default text provider: {config.agents.defaults.default_text_provider}")
+        if config.agents.defaults.default_vision_provider:
+            console.print(f"Default vision provider: {config.agents.defaults.default_vision_provider}")
         
         # Check API keys from registry
         for spec in PROVIDERS:

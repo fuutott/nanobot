@@ -195,6 +195,10 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    default_text_model: str | None = None
+    default_vision_model: str | None = None
+    default_text_provider: str | None = None
+    default_vision_provider: str | None = None
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20
