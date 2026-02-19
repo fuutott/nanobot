@@ -175,6 +175,18 @@ class QQConfig(Base):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
 
+class WebUIConfig(Base):
+    """Web chat UI channel configuration."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 18792
+    title: str = "nanobot"  # Browser tab / header title
+    username: str = ""  # Leave empty to disable authentication
+    password: str = ""  # Leave empty to disable authentication
+    allow_from: list[str] = Field(default_factory=list)  # Allowed client IPs (empty = all)
+
+
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
@@ -188,6 +200,7 @@ class ChannelsConfig(Base):
     email: EmailConfig = Field(default_factory=EmailConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     qq: QQConfig = Field(default_factory=QQConfig)
+    webui: WebUIConfig = Field(default_factory=WebUIConfig)
 
 
 class AgentDefaults(Base):

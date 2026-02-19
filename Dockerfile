@@ -41,6 +41,7 @@ USER nanobottie
 # Gateway default port
 EXPOSE 18790
 EXPOSE 18791
+EXPOSE 18792
 
 ENTRYPOINT ["nanobot"]
 CMD ["status"]
