@@ -145,10 +145,12 @@ class WebUIChannel(BaseChannel):
             return JSONResponse({"error": "Invalid credentials"}, status_code=401)
 
         @app.post("/upload")
-        async def upload(request: Request, file: UploadFile = File(...)) -> JSONResponse:
+        async def upload(request: Request, file: UploadFile | None = File(None)) -> JSONResponse:
             token = request.headers.get("authorization", "").removeprefix("Bearer ")
             if not self._check_token(token or None):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            if file is None:
+                return JSONResponse({"error": "No file provided"}, status_code=422)
             media_dir = Path.home() / ".nanobot" / "media"
             media_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(file.filename or "file").suffix or ""

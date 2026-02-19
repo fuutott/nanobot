@@ -15,7 +15,7 @@
     --radius:12px;--font:'Segoe UI',system-ui,sans-serif;--mobile-sidebar-width:min(78vw,280px);--mobile-backdrop:rgba(0,0,0,.45);
   }
   html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font)}
-  #app{display:flex;height:100vh}
+  #app{display:flex;height:100vh;height:100dvh}
 
   /* ── Sidebar ── */
   #sidebar{
@@ -121,7 +121,7 @@
   .attach-chip-del{background:none;border:none;color:var(--text-muted);cursor:pointer;padding:0 2px;font-size:14px;flex-shrink:0}
   .attach-chip-del:hover{color:var(--danger)}
   #input-wrap{
-    display:flex;align-items:flex-end;gap:10px;
+    display:flex;align-items:center;gap:10px;
     background:var(--input-bg);border:1px solid var(--border);
     border-radius:12px;padding:10px 12px;transition:.15s
   }
@@ -159,12 +159,12 @@
   @media(max-width:768px){
     #btn-menu{display:flex}
     #sidebar{
-      position:fixed;left:0;top:0;bottom:0;z-index:30;max-width:none;width:var(--mobile-sidebar-width);
+      position:fixed;left:0;top:0;bottom:0;height:100vh;height:100dvh;z-index:30;max-width:none;width:var(--mobile-sidebar-width);
       transform:translateX(-100%);transition:transform .2s ease;
     }
     #app.sidebar-open #sidebar{transform:translateX(0)}
     #sidebar-backdrop{
-      display:block;position:fixed;inset:0;background:var(--mobile-backdrop);z-index:20;
+      display:block;position:fixed;inset:0;height:100vh;height:100dvh;background:var(--mobile-backdrop);z-index:20;
       opacity:0;pointer-events:none;transition:opacity .2s ease
     }
     #app.sidebar-open #sidebar-backdrop{opacity:1;pointer-events:auto}
@@ -671,12 +671,7 @@ input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 200) + 'px';
 });
-input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-});
+// Enter always inserts a newline; send only via button/touch
 
 // ── Init ─────────────────────────────────────────────────────────────────
 renderSidebar();
