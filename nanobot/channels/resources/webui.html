@@ -12,7 +12,7 @@
     --accent-hover:#3fb950;--msg-user:#1c2128;--msg-bot:#0d1117;
     --text:#e6edf3;--text-muted:#8b949e;--input-bg:#1c2128;
     --scrollbar:#30363d;--danger:#da3633;--hover:#21262d;
-    --radius:12px;--font:'Segoe UI',system-ui,sans-serif;
+    --radius:12px;--font:'Segoe UI',system-ui,sans-serif;--mobile-sidebar-width:min(78vw,280px);--mobile-backdrop:rgba(0,0,0,.45);
   }
   html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font)}
   #app{display:flex;height:100vh}
@@ -159,12 +159,12 @@
   @media(max-width:768px){
     #btn-menu{display:flex}
     #sidebar{
-      position:fixed;left:0;top:0;bottom:0;z-index:30;max-width:none;width:min(78vw,280px);
+      position:fixed;left:0;top:0;bottom:0;z-index:30;max-width:none;width:var(--mobile-sidebar-width);
       transform:translateX(-100%);transition:transform .2s ease;
     }
     #app.sidebar-open #sidebar{transform:translateX(0)}
     #sidebar-backdrop{
-      display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20;
+      display:block;position:fixed;inset:0;background:var(--mobile-backdrop);z-index:20;
       opacity:0;pointer-events:none;transition:opacity .2s ease
     }
     #app.sidebar-open #sidebar-backdrop{opacity:1;pointer-events:auto}
@@ -232,7 +232,7 @@
   <!-- Main -->
   <div id="main">
     <div id="main-header">
-      <button id="btn-menu" title="Chats" onclick="toggleSidebar()">
+      <button id="btn-menu" title="Chats" aria-label="Toggle chat sidebar" aria-expanded="false" onclick="toggleSidebar()">
         <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
       </button>
       <span id="chat-title-display"></span>
@@ -369,17 +369,23 @@ function addMessage(chatId, role, content, media_paths) {
 let activeChatId = null;
 let ws = null;
 let waitingReply = false;
-const MOBILE_BREAKPOINT = 768;
 
 function isMobileView() {
-  return window.matchMedia(`(max-width:${MOBILE_BREAKPOINT}px)`).matches;
+  return window.matchMedia('(max-width:768px)').matches;
 }
 function closeSidebarOnMobile() {
-  if (isMobileView()) document.getElementById('app').classList.remove('sidebar-open');
+  if (isMobileView()) {
+    document.getElementById('app').classList.remove('sidebar-open');
+    document.getElementById('btn-menu').setAttribute('aria-expanded', 'false');
+  }
 }
 function toggleSidebar() {
   const app = document.getElementById('app');
   app.classList.toggle('sidebar-open');
+  document.getElementById('btn-menu').setAttribute(
+    'aria-expanded',
+    app.classList.contains('sidebar-open') ? 'true' : 'false',
+  );
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────
@@ -681,7 +687,6 @@ initAuth().then(() => {
     openChat(order[order.length - 1]);
   }
 });
-window.addEventListener('resize', closeSidebarOnMobile);
 </script>
 </body>
 </html>
