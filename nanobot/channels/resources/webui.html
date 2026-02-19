@@ -51,6 +51,11 @@
     padding:12px 20px;border-bottom:1px solid var(--border);
     display:flex;align-items:center;gap:10px;min-height:52px
   }
+  #btn-menu{
+    display:none;background:none;border:1px solid var(--border);color:var(--text);
+    width:34px;height:34px;border-radius:8px;cursor:pointer;align-items:center;justify-content:center
+  }
+  #btn-menu svg{width:18px;height:18px;fill:currentColor}
   #chat-title-display{font-size:15px;font-weight:600;flex:1;opacity:.9}
   #empty-state{
     flex:1;display:flex;flex-direction:column;align-items:center;
@@ -150,8 +155,24 @@
   ::-webkit-scrollbar-thumb{background:var(--scrollbar);border-radius:3px}
   ::-webkit-scrollbar-thumb:hover{background:#484f58}
 
-  @media(max-width:600px){
-    #sidebar{width:200px}
+  #sidebar-backdrop{display:none}
+  @media(max-width:768px){
+    #btn-menu{display:flex}
+    #sidebar{
+      position:fixed;left:0;top:0;bottom:0;z-index:30;max-width:none;width:min(78vw,280px);
+      transform:translateX(-100%);transition:transform .2s ease;
+    }
+    #app.sidebar-open #sidebar{transform:translateX(0)}
+    #sidebar-backdrop{
+      display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20;
+      opacity:0;pointer-events:none;transition:opacity .2s ease
+    }
+    #app.sidebar-open #sidebar-backdrop{opacity:1;pointer-events:auto}
+    #main-header{padding:10px 12px}
+    #messages{padding:12px}
+    #input-area{padding:10px 12px}
+    .msg{max-width:100%}
+    .chat-item-del{opacity:1}
   }
 
   /* ── Login overlay ── */
@@ -198,6 +219,7 @@
   </div>
 </div>
 <div id="app">
+  <div id="sidebar-backdrop" onclick="closeSidebarOnMobile()"></div>
   <!-- Sidebar -->
   <div id="sidebar">
     <div id="sidebar-header">
@@ -210,6 +232,9 @@
   <!-- Main -->
   <div id="main">
     <div id="main-header">
+      <button id="btn-menu" title="Chats" onclick="toggleSidebar()">
+        <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+      </button>
       <span id="chat-title-display"></span>
     </div>
     <div id="empty-state">
@@ -344,6 +369,18 @@ function addMessage(chatId, role, content, media_paths) {
 let activeChatId = null;
 let ws = null;
 let waitingReply = false;
+const MOBILE_BREAKPOINT = 768;
+
+function isMobileView() {
+  return window.matchMedia(`(max-width:${MOBILE_BREAKPOINT}px)`).matches;
+}
+function closeSidebarOnMobile() {
+  if (isMobileView()) document.getElementById('app').classList.remove('sidebar-open');
+}
+function toggleSidebar() {
+  const app = document.getElementById('app');
+  app.classList.toggle('sidebar-open');
+}
 
 // ── WebSocket ────────────────────────────────────────────────────────────
 function connectWS(chatId) {
@@ -598,6 +635,7 @@ function openChat(id) {
   renderMessages(id);
   renderSidebar();
   connectWS(id);
+  closeSidebarOnMobile();
 
   document.getElementById('msg-input').focus();
 }
@@ -643,6 +681,7 @@ initAuth().then(() => {
     openChat(order[order.length - 1]);
   }
 });
+window.addEventListener('resize', closeSidebarOnMobile);
 </script>
 </body>
 </html>
