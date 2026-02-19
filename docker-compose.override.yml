@@ -9,5 +9,6 @@ services:
     ports:
       - "18790:18790"
       - "18791:18791"
+      - "18792:18792"
     command: ["gateway"]
     restart: unless-stopped

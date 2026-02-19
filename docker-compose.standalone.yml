@@ -10,5 +10,6 @@ services:
     ports:
       - "18790:18790"
       - "18791:18791"
+      - "18792:18792"
     volumes:
       - ${USERPROFILE}/.nanobot:/home/nanobottie/.nanobot
