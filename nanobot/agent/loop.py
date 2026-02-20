@@ -53,7 +53,7 @@ class AgentLoop:
         model: str | None = None,
         default_text_model: str | None = None,
         default_vision_model: str | None = None,
-        max_iterations: int = 20,
+        max_iterations: int = 100,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         memory_window: int = 50,
