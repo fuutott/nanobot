@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from loguru import logger
 import uvicorn
@@ -34,6 +35,10 @@ class OpenAIAPIChannel(BaseChannel):
     async def start(self) -> None:
         """Start the OpenAI-compatible HTTP server."""
         self._running = True
+        if not self._auth_map():
+            raise RuntimeError(
+                "openaiapi requires authentication: set channels.openaiapi.apiKey or channels.openaiapi.apiKeys"
+            )
         self._app = FastAPI(title="nanobot OpenAI API", version="1.0")
         self._register_routes(self._app)
 
@@ -77,6 +82,16 @@ class OpenAIAPIChannel(BaseChannel):
             future.set_result(msg.content)
 
     def _register_routes(self, app: FastAPI) -> None:
+        @app.middleware("http")
+        async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+            try:
+                principal = self._authenticate_request(request)
+            except HTTPException as exc:
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+            request.state.auth_principal = principal
+            return await call_next(request)
+
         @app.get("/health")
         async def health() -> dict[str, str]:
             return {"status": "ok"}
@@ -97,8 +112,6 @@ class OpenAIAPIChannel(BaseChannel):
 
         @app.post("/v1/chat/completions")
         async def chat_completions(payload: dict[str, Any], request: Request) -> dict[str, Any]:
-            self._check_bearer_auth(request)
-
             stream = bool(payload.get("stream"))
 
             requested_model = str(payload.get("model") or "nanobot-agent")
@@ -111,7 +124,7 @@ class OpenAIAPIChannel(BaseChannel):
                 raise HTTPException(status_code=400, detail="could not extract text prompt from messages")
 
             request_id = uuid.uuid4().hex
-            sender_id = self._sender_id(request, payload)
+            sender_id = self._sender_id(request)
             if not self.is_allowed(sender_id):
                 raise HTTPException(status_code=403, detail="sender not allowed")
 
@@ -229,15 +242,28 @@ class OpenAIAPIChannel(BaseChannel):
                 },
             }
 
-    def _check_bearer_auth(self, request: Request) -> None:
-        """Validate optional Bearer auth configured for OpenAI API channel."""
-        if not self.config.api_key:
-            return
+    def _auth_map(self) -> dict[str, str]:
+        """Return accepted API keys and their server-side principal IDs."""
+        mapping = dict(self.config.api_keys or {})
+        if self.config.api_key and self.config.api_key not in mapping:
+            mapping[self.config.api_key] = "api:default"
+        return mapping
+
+    def _authenticate_request(self, request: Request) -> str:
+        """Validate Bearer token and return authenticated principal ID."""
+        auth_map = self._auth_map()
+        if not auth_map:
+            raise HTTPException(status_code=500, detail="openaiapi auth is not configured")
 
         auth = request.headers.get("authorization", "")
-        expected = f"Bearer {self.config.api_key}"
-        if auth != expected:
+        if not auth.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+
+        token = auth.removeprefix("Bearer ").strip()
+        principal = auth_map.get(token)
+        if not principal:
             raise HTTPException(status_code=401, detail="invalid api key")
+        return principal
 
     @staticmethod
     def _message_text(content: Any) -> str:
@@ -328,11 +354,10 @@ class OpenAIAPIChannel(BaseChannel):
         client = request.client.host if request.client else "http-client"
         return f"http:{client}"
 
-    def _sender_id(self, request: Request, payload: dict[str, Any]) -> str:
-        """Build sender identifier for allowlist checks."""
-        user = payload.get("user")
-        if isinstance(user, str) and user.strip():
-            return user.strip()
+    def _sender_id(self, request: Request) -> str:
+        """Build sender identifier from authenticated server-side principal."""
+        principal = getattr(request.state, "auth_principal", "")
+        if isinstance(principal, str) and principal.strip():
+            return principal.strip()
 
-        client = request.client.host if request.client else "http-client"
-        return f"http:{client}"
+        raise HTTPException(status_code=401, detail="unauthenticated request")

@@ -13,3 +13,4 @@ services:
       - "18792:18792"
     volumes:
       - ${USERPROFILE}/.nanobot:/home/nanobottie/.nanobot
+      - ${USERPROFILE}/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit

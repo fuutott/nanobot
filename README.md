@@ -354,15 +354,19 @@ Expose nanobot through an OpenAI-compatible endpoint (`/v1/chat/completions`).
       "enabled": true,
       "host": "0.0.0.0",
       "port": 18791,
-      "apiKey": "your-channel-key",
-      "allowFrom": ["my-client"]
+      "apiKeys": {
+        "nbk-owner-very-secret": "owner",
+        "nbk-ci-very-secret": "ci"
+      },
+      "allowFrom": ["owner"]
     }
   }
 }
 ```
 
-> `apiKey` is optional. When set, clients must send `Authorization: Bearer your-channel-key`.
-> `allowFrom` checks OpenAI `user` field (or client host if `user` is omitted).
+> OpenAI API auth is mandatory: every endpoint requires `Authorization: Bearer <key>`.
+> Use `apiKeys` to map keys to server-side principals; `allowFrom` checks those principals, not request `user`.
+> Legacy `apiKey` (single key) is still supported and maps to principal `api:default`.
 > `model` in incoming requests is accepted for compatibility and ignored for execution; nanobot always uses the provider/model configured in your `config.json`.
 
 **2. Run**
@@ -375,11 +379,11 @@ nanobot gateway
 
 ```bash
 curl http://localhost:18791/v1/chat/completions \
-  -H "Authorization: Bearer your-channel-key" \
+  -H "Authorization: Bearer nbk-owner-very-secret" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "nanobot-agent",
-    "user": "my-client",
+    "user": "client-metadata-only",
     "messages": [{"role": "user", "content": "hello"}]
   }'
 ```
@@ -834,6 +838,8 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 |--------|---------|-------------|
 | `tools.restrictToWorkspace` | `true` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
 | `channels.*.allowFrom` | `[]` (allow all) | Whitelist of user IDs. Empty = allow everyone; non-empty = only listed users can interact. |
+| `channels.openaiapi.apiKeys` | `{}` | Bearer key → principal map used for mandatory OpenAI API authentication. |
+| `channels.webui.allowedOrigins` | `[]` | Extra trusted browser origins for WebUI login/upload/WebSocket, and CORS response headers on WebUI HTTP routes (same-host origin is always trusted). |
 
 
 ## CLI Reference

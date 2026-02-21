@@ -10,8 +10,10 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
 import uvicorn
@@ -63,6 +65,7 @@ class WebUIChannel(BaseChannel):
         """Start the Web UI HTTP/WS server."""
         self._running = True
         self._app = FastAPI(title="nanobot Web UI")
+        self._configure_cors(self._app)
         self._register_routes(self._app)
 
         logger.info(
@@ -119,6 +122,62 @@ class WebUIChannel(BaseChannel):
             return True
         return bool(token and token in self._tokens)
 
+    def _normalize_origin(self, origin: str) -> str:
+        parsed = urlparse(origin.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+    def _cors_allowed_origins(self) -> list[str]:
+        origins: list[str] = []
+        for origin in self.config.allowed_origins:
+            normalized = self._normalize_origin(origin)
+            if normalized and normalized not in origins:
+                origins.append(normalized)
+        return origins
+
+    def _configure_cors(self, app: FastAPI) -> None:
+        origins = self._cors_allowed_origins()
+        if not origins:
+            return
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
+
+    def _is_trusted_origin(self, origin: str | None, host: str | None) -> bool:
+        if not origin or not host:
+            return False
+
+        normalized = self._normalize_origin(origin)
+        if not normalized:
+            return False
+
+        host_lc = host.strip().lower()
+        if normalized in {f"http://{host_lc}", f"https://{host_lc}"}:
+            return True
+
+        allowed = {self._normalize_origin(x) for x in self.config.allowed_origins}
+        return normalized in allowed
+
+    def _http_request_is_trusted(self, request: Request) -> bool:
+        host = request.headers.get("host", "")
+        origin = request.headers.get("origin")
+        if self._is_trusted_origin(origin, host):
+            return True
+
+        referer = request.headers.get("referer")
+        if referer:
+            parsed = urlparse(referer)
+            referer_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+            return self._is_trusted_origin(referer_origin, host)
+
+        return False
+
     # ------------------------------------------------------------------
     # Routes
     # ------------------------------------------------------------------
@@ -132,6 +191,9 @@ class WebUIChannel(BaseChannel):
 
         @app.post("/login")
         async def login(request: Request) -> JSONResponse:
+            if not self._http_request_is_trusted(request):
+                return JSONResponse({"error": "Forbidden origin"}, status_code=403)
+
             if not self._auth_enabled():
                 return JSONResponse({"token": ""})
             body = await request.json()
@@ -146,6 +208,9 @@ class WebUIChannel(BaseChannel):
 
         @app.post("/upload")
         async def upload(request: Request, file: UploadFile | None = File(None)) -> JSONResponse:
+            if not self._http_request_is_trusted(request):
+                return JSONResponse({"error": "Forbidden origin"}, status_code=403)
+
             token = request.headers.get("authorization", "").removeprefix("Bearer ")
             if not self._check_token(token or None):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -164,6 +229,12 @@ class WebUIChannel(BaseChannel):
         async def websocket_endpoint(websocket: WebSocket, chat_id: str, token: str = "") -> None:
             client_host = websocket.client.host if websocket.client else "unknown"
             sender_id = f"web:{client_host}"
+            ws_origin = websocket.headers.get("origin")
+            ws_host = websocket.headers.get("host")
+
+            if not self._is_trusted_origin(ws_origin, ws_host):
+                await websocket.close(code=1008)  # Policy violation
+                return
 
             if not self.is_allowed(sender_id):
                 await websocket.close(code=1008)  # Policy violation

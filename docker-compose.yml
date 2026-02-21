@@ -3,7 +3,8 @@ x-common-config: &common-config
     context: .
     dockerfile: Dockerfile
   volumes:
-    - ~/.nanobot:/root/.nanobot
+    - ~/.nanobot:/home/nanobottie/.nanobot
+    - ~/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit
 
 services:
   nanobot-gateway:

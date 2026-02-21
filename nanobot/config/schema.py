@@ -36,8 +36,9 @@ class OpenAIAPIConfig(Base):
     enabled: bool = False
     host: str = "0.0.0.0"
     port: int = 18791
-    api_key: str = ""  # Optional Bearer token required by /v1/chat/completions
-    allow_from: list[str] = Field(default_factory=list)  # Allowed caller identifiers (user field or client host)
+    api_key: str = ""  # Legacy single Bearer token
+    api_keys: dict[str, str] = Field(default_factory=dict)  # Bearer token -> server-side principal mapping
+    allow_from: list[str] = Field(default_factory=list)  # Allowed authenticated principal IDs
     request_timeout_seconds: int = 120
 
 
@@ -185,6 +186,7 @@ class WebUIConfig(Base):
     username: str = ""  # Leave empty to disable authentication
     password: str = ""  # Leave empty to disable authentication
     allow_from: list[str] = Field(default_factory=list)  # Allowed client IPs (empty = all)
+    allowed_origins: list[str] = Field(default_factory=list)  # Additional trusted browser origins
 
 
 class ChannelsConfig(Base):
