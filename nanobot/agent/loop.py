@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+import json_repair
 from loguru import logger
 
 from nanobot.agent.autocompact import AutoCompact
@@ -242,6 +243,7 @@ class AgentLoop:
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
+        self.enable_native_web_tools = enable_native_web_tools
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
@@ -257,6 +259,7 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             disabled_skills=disabled_skills,
+            enable_native_web_tools=self.enable_native_web_tools,
         )
         self._unified_session = unified_session
         self._running = False
@@ -363,7 +366,7 @@ class AgentLoop:
                     allowed_env_keys=self.exec_config.allowed_env_keys,
                 )
             )
-        if self.web_config.enable:
+        if self.enable_native_web_tools:
             self.tools.register(
                 WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy)
             )
@@ -536,6 +539,7 @@ class AgentLoop:
                     pending_msg.channel,
                     pending_msg.chat_id,
                     self.context.timezone,
+                    sender_id=pending_msg.sender_id,
                 )
                 if isinstance(user_content, str):
                     merged: str | list[dict[str, Any]] = f"{runtime_ctx}\n\n{user_content}"
@@ -865,6 +869,7 @@ class AgentLoop:
                 current_message="" if is_subagent else msg.content,
                 channel=channel,
                 chat_id=chat_id,
+                sender_id=msg.sender_id,
                 session_summary=pending,
                 current_role=current_role,
             )
@@ -947,6 +952,7 @@ class AgentLoop:
                 media=msg.media if msg.media else None,
                 channel=msg.channel,
                 chat_id=msg.chat_id,
+                sender_id=msg.sender_id,
             )
 
         async def _bus_progress(

@@ -37,7 +37,7 @@ class DreamConfig(Base):
 
     _HOUR_MS = 3_600_000
 
-    interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
+    interval_h: int = Field(default=8, ge=1)  # Every 8 hours by default
     cron: str | None = Field(default=None, exclude=True)  # Legacy compatibility override
     model_override: str | None = Field(
         default=None,
@@ -70,9 +70,11 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
-    provider: str = (
-        "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    )
+    provider: str = "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
+    default_text_model: str | None = None
+    default_vision_model: str | None = None
+    default_text_provider: str | None = None
+    default_vision_provider: str | None = None
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     context_block_limit: int | None = None
@@ -184,11 +186,8 @@ class WebSearchConfig(Base):
 
 class WebToolsConfig(Base):
     """Web tools configuration."""
-
-    enable: bool = True
-    proxy: str | None = (
-        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
-    )
+    enable: bool = Field(default=True, validation_alias=AliasChoices("enable", "enabled"))
+    proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
@@ -202,8 +201,7 @@ class ExecToolConfig(Base):
     allowed_env_keys: list[str] = Field(default_factory=list)  # Env var names to pass through to subprocess (e.g. ["GOPATH", "JAVA_HOME"])
 
 class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
-
+    """MCP server connection configuration (stdio, SSE, or streamable HTTP)."""
     type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments

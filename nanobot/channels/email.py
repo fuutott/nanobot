@@ -245,18 +245,55 @@ class EmailChannel(BaseChannel):
 
     def _smtp_send(self, msg: EmailMessage) -> None:
         timeout = 30
-        if self.config.smtp_use_ssl:
+        smtp_port = int(self.config.smtp_port)
+        use_ssl = bool(self.config.smtp_use_ssl)
+        use_tls = bool(self.config.smtp_use_tls)
+
+        # Port 587 is the standard SMTP submission port and expects plain SMTP
+        # upgraded via STARTTLS, not implicit SSL handshakes.
+        if use_ssl and smtp_port == 587:
+            logger.warning(
+                "Email SMTP config mismatch: smtp_use_ssl=true with port 587. "
+                "Falling back to STARTTLS for {}:{}",
+                self.config.smtp_host,
+                smtp_port,
+            )
+            use_ssl = False
+            if not use_tls:
+                logger.warning(
+                    "Email SMTP config mismatch: enabling STARTTLS because "
+                    "smtp_use_ssl=true was set on port 587 with smtp_use_tls=false"
+                )
+                use_tls = True
+
+        # Port 465 is the implicit TLS SMTPS port and should use SMTP_SSL.
+        if smtp_port == 465 and not use_ssl:
+            logger.warning(
+                "Email SMTP config mismatch: port 465 without smtp_use_ssl. "
+                "Enabling implicit SSL for {}:{}",
+                self.config.smtp_host,
+                smtp_port,
+            )
+            use_ssl = True
+            if use_tls:
+                logger.warning(
+                    "Email SMTP config mismatch: disabling STARTTLS because "
+                    "port 465 uses implicit SSL"
+                )
+                use_tls = False
+
+        if use_ssl:
             with smtplib.SMTP_SSL(
                 self.config.smtp_host,
-                self.config.smtp_port,
+                smtp_port,
                 timeout=timeout,
             ) as smtp:
                 smtp.login(self.config.smtp_username, self.config.smtp_password)
                 smtp.send_message(msg)
             return
 
-        with smtplib.SMTP(self.config.smtp_host, self.config.smtp_port, timeout=timeout) as smtp:
-            if self.config.smtp_use_tls:
+        with smtplib.SMTP(self.config.smtp_host, smtp_port, timeout=timeout) as smtp:
+            if use_tls:
                 smtp.starttls(context=ssl.create_default_context())
             smtp.login(self.config.smtp_username, self.config.smtp_password)
             smtp.send_message(msg)

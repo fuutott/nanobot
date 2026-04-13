@@ -119,6 +119,11 @@ class WebSearchTool(Tool):
         return provider
 
     @property
+    def exclusive(self) -> bool:
+        """Run one web search at a time to avoid provider/library concurrency stalls."""
+        return True
+
+    @property
     def read_only(self) -> bool:
         return True
 
@@ -130,21 +135,39 @@ class WebSearchTool(Tool):
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         provider = self.config.provider.strip().lower() or "brave"
         n = min(max(count or self.config.max_results, 1), 10)
+        timeout_s = max(1, int(self.config.timeout or 30))
 
+        try:
+            return await asyncio.wait_for(
+                self._dispatch_search(provider, query, n),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "web_search timed out provider={} timeout={}s query={!r}",
+                provider,
+                timeout_s,
+                query[:200],
+            )
+            return (
+                f"Error: web_search timed out after {timeout_s}s "
+                f"(provider={provider}). Try again with a narrower query or another provider."
+            )
+
+    async def _dispatch_search(self, provider: str, query: str, n: int) -> str:
         if provider == "duckduckgo":
             return await self._search_duckduckgo(query, n)
-        elif provider == "tavily":
+        if provider == "tavily":
             return await self._search_tavily(query, n)
-        elif provider == "searxng":
+        if provider == "searxng":
             return await self._search_searxng(query, n)
-        elif provider == "jina":
+        if provider == "jina":
             return await self._search_jina(query, n)
-        elif provider == "brave":
+        if provider == "brave":
             return await self._search_brave(query, n)
-        elif provider == "kagi":
+        if provider == "kagi":
             return await self._search_kagi(query, n)
-        else:
-            return f"Error: unknown search provider '{provider}'"
+        return f"Error: unknown search provider '{provider}'"
 
     async def _search_brave(self, query: str, n: int) -> str:
         api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY", "")

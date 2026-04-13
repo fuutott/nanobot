@@ -71,6 +71,7 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
         current_message="Return exactly: OK",
         channel="cli",
         chat_id="direct",
+        sender_id="u-123",
     )
 
     assert messages[0]["role"] == "system"
@@ -84,6 +85,7 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     assert "Current Time:" in user_content
     assert "Channel: cli" in user_content
     assert "Chat ID: direct" in user_content
+    assert "Sender ID: u-123" in user_content
     assert "Return exactly: OK" in user_content
 
 
