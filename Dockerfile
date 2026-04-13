@@ -17,13 +17,18 @@ WORKDIR /app
 # Install Python dependencies first (cached layer)
 COPY pyproject.toml README.md LICENSE ./
 RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
-    uv pip install --system --no-cache . && \
+    uv pip install --system --no-cache '.[discord]' && \
     rm -rf nanobot bridge
 
 # Copy the full source and install
 COPY nanobot/ nanobot/
 COPY bridge/ bridge/
-RUN uv pip install --system --no-cache .
+COPY plugins/ plugins/
+RUN uv pip install --system --no-cache '.[discord]' && \
+        uv pip install --system --no-cache \
+            /app/plugins/nanobot-channel-webui \
+            /app/plugins/nanobot-channel-openaiapi \
+            /app/plugins/nanobot-channel-mcpserver
 
 # Build the WhatsApp bridge
 WORKDIR /app/bridge
@@ -33,18 +38,21 @@ RUN git config --global --add url."https://github.com/".insteadOf ssh://git@gith
 WORKDIR /app
 
 # Create non-root user and config directory
-RUN useradd -m -u 1000 -s /bin/bash nanobot && \
-    mkdir -p /home/nanobot/.nanobot && \
-    chown -R nanobot:nanobot /home/nanobot /app
+RUN useradd -m -u 1000 -s /bin/bash nanobottie && \
+    mkdir -p /home/nanobottie/.nanobot && \
+    chown -R nanobottie:nanobottie /home/nanobottie /app
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 
-USER nanobot
-ENV HOME=/home/nanobot
+USER nanobottie
+ENV HOME=/home/nanobottie
 
 # Gateway default port
 EXPOSE 18790
+EXPOSE 18791
+EXPOSE 18792
+EXPOSE 18793
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["status"]
