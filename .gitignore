@@ -92,3 +92,6 @@ logs/
 tmp/
 temp/
 *.tmp
+bot-chat-plan.md
+mcp-server-plan.md
+plugin-migration-plan.md

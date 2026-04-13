@@ -1,0 +1,152 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Checkpoint now",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NonInteractive", "-File", "${workspaceFolder}/.gitsync/checkpoint.ps1"],
+      "windows": {
+        "command": "pwsh",
+        "args": ["-NonInteractive", "-File", "${workspaceFolder}/.gitsync/checkpoint.ps1"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/checkpoint.sh"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/checkpoint.sh"]
+      },
+      "group": "none",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Start checkpoint watcher",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-File", "${workspaceFolder}/.gitsync/watch-checkpoint.ps1"],
+      "windows": {
+        "command": "pwsh",
+        "args": ["-File", "${workspaceFolder}/.gitsync/watch-checkpoint.ps1"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/watch-checkpoint.sh"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/watch-checkpoint.sh"]
+      },
+      "isBackground": true,
+      "group": "none",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "problemMatcher": [
+        {
+          "pattern": [{ "regexp": "^(never)$", "file": 1, "line": 2, "message": 3 }],
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^Watching",
+            "endsPattern": "^Watcher stopped"
+          }
+        }
+      ],
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "Promote WIP to main",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NonInteractive", "-File", "${workspaceFolder}/.gitsync/promote.ps1", "-Message", "${input:promoteMessage}"],
+      "windows": {
+        "command": "pwsh",
+        "args": ["-NonInteractive", "-File", "${workspaceFolder}/.gitsync/promote.ps1", "-Message", "${input:promoteMessage}"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/promote.sh", "${input:promoteMessage}"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/promote.sh", "${input:promoteMessage}"]
+      },
+      "group": "none",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Checkpoint now (with message)",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NonInteractive",
+        "-File", "${workspaceFolder}/.gitsync/checkpoint.ps1",
+        "-Message", "${input:checkpointMessage}"
+      ],
+      "windows": {
+        "command": "pwsh",
+        "args": [
+          "-NonInteractive",
+          "-File", "${workspaceFolder}/.gitsync/checkpoint.ps1",
+          "-Message", "${input:checkpointMessage}"
+        ]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/checkpoint.sh", "${input:checkpointMessage}"]
+      },
+      "osx": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/.gitsync/checkpoint.sh", "${input:checkpointMessage}"]
+      },
+      "group": "none",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": false,
+        "clear": false
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "promoteMessage",
+      "type": "promptString",
+      "description": "Clean commit message for main (e.g. feat: ...)",
+      "default": ""
+    },
+    {
+      "id": "checkpointMessage",
+      "type": "promptString",
+      "description": "Checkpoint label (optional)",
+      "default": ""
+    }
+  ]
+}

@@ -3,7 +3,8 @@ x-common-config: &common-config
     context: .
     dockerfile: Dockerfile
   volumes:
-    - ~/.nanobot:/home/nanobot/.nanobot
+    - ~/.nanobot:/home/nanobottie/.nanobot
+    - ~/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit
   cap_drop:
     - ALL
   cap_add:
@@ -20,6 +21,8 @@ services:
     restart: unless-stopped
     ports:
       - 18790:18790
+      - 18792:18792
+      - 18793:18793
     deploy:
       resources:
         limits:
@@ -33,7 +36,7 @@ services:
     container_name: nanobot-api
     <<: *common-config
     command:
-      ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/.nanobot/api-workspace"]
+      ["serve", "--host", "0.0.0.0", "-w", "/home/nanobottie/.nanobot/api-workspace"]
     restart: unless-stopped
     ports:
       - 127.0.0.1:8900:8900
