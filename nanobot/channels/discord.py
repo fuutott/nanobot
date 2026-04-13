@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -63,6 +63,14 @@ class DiscordConfig(Base):
     proxy: str | None = None
     proxy_username: str | None = None
     proxy_password: str | None = None
+
+    @field_validator("allow_from", mode="before")
+    @classmethod
+    def _coerce_allow_from_ids(cls, value: Any) -> Any:
+        """Permit numeric IDs in config and normalize them to string IDs."""
+        if isinstance(value, list):
+            return [str(item) if isinstance(item, int) else item for item in value]
+        return value
 
 
 if DISCORD_AVAILABLE:
@@ -433,20 +441,16 @@ class DiscordChannel(BaseChannel):
             raise
 
     async def _handle_discord_message(self, message: discord.Message) -> None:
-        """Handle incoming Discord messages from discord.py.
-
-        Self-loop guard: only drop messages from this bot's own account. Messages
-        from other bots are allowed through so multi-agent setups (one bot asking
-        another for help, a bot mentioning another by @name, etc.) can work.
-        Bot-from-bot loops are still prevented per-instance because each bot
-        still ignores its own outbound messages. (#3217)
-        """
-        if self._bot_user_id is not None and str(message.author.id) == self._bot_user_id:
-            return
-
+        """Handle incoming Discord messages from discord.py."""
         sender_id = str(message.author.id)
         channel_id = self._channel_key(message.channel)
         content = message.content or ""
+
+        if message.author.bot:
+            if sender_id == self._bot_user_id:
+                return
+            if not self._message_mentions_current_bot(message, content):
+                return
 
         if not self._should_accept_inbound(message, sender_id, content):
             return
@@ -612,15 +616,24 @@ class DiscordChannel(BaseChannel):
                 )
                 return False
 
-            if any(str(user.id) == bot_user_id for user in message.mentions):
-                return True
-            if f"<@{bot_user_id}>" in content or f"<@!{bot_user_id}>" in content:
+            if self._message_mentions_current_bot(message, content):
                 return True
 
             logger.debug("Discord message in {} ignored (bot not mentioned)", message.channel.id)
             return False
 
         return True
+
+    def _message_mentions_current_bot(self, message: discord.Message, content: str) -> bool:
+        """Return true when message includes an explicit mention of this bot user."""
+        bot_user_id = self._bot_user_id
+        if bot_user_id is None:
+            return False
+        if any(str(user.id) == bot_user_id for user in message.mentions):
+            return True
+        if f"<@{bot_user_id}>" in content or f"<@!{bot_user_id}>" in content:
+            return True
+        return False
 
     async def _start_typing(self, channel: Messageable) -> None:
         """Start periodic typing indicator for a channel."""

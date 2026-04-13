@@ -396,6 +396,115 @@ async def test_send_uses_smtp_and_reply_subject(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_port_587_with_ssl_enabled_falls_back_to_starttls(monkeypatch) -> None:
+    class FakeSMTP:
+        def __init__(self, _host: str, _port: int, timeout: int = 30) -> None:
+            self.started_tls = False
+            self.logged_in = False
+            self.sent_messages: list[EmailMessage] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def starttls(self, context=None):
+            self.started_tls = True
+
+        def login(self, _user: str, _pw: str):
+            self.logged_in = True
+
+        def send_message(self, msg: EmailMessage):
+            self.sent_messages.append(msg)
+
+    class FakeSMTPSSL:
+        def __init__(self, _host: str, _port: int, timeout: int = 30) -> None:
+            raise AssertionError("SMTP_SSL should not be used for port 587 fallback")
+
+    fake_instances: list[FakeSMTP] = []
+
+    def _smtp_factory(host: str, port: int, timeout: int = 30):
+        instance = FakeSMTP(host, port, timeout=timeout)
+        fake_instances.append(instance)
+        return instance
+
+    monkeypatch.setattr("nanobot.channels.email.smtplib.SMTP", _smtp_factory)
+    monkeypatch.setattr("nanobot.channels.email.smtplib.SMTP_SSL", FakeSMTPSSL)
+
+    cfg = _make_config()
+    cfg.smtp_port = 587
+    cfg.smtp_use_ssl = True
+    cfg.smtp_use_tls = False
+
+    channel = EmailChannel(cfg, MessageBus())
+    await channel.send(
+        OutboundMessage(
+            channel="email",
+            chat_id="alice@example.com",
+            content="hello",
+        )
+    )
+
+    assert len(fake_instances) == 1
+    assert fake_instances[0].started_tls is True
+    assert fake_instances[0].logged_in is True
+    assert len(fake_instances[0].sent_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_port_465_uses_smtp_ssl_even_when_only_tls_enabled(monkeypatch) -> None:
+    class FakeSMTP:
+        def __init__(self, _host: str, _port: int, timeout: int = 30) -> None:
+            raise AssertionError("SMTP should not be used for implicit SSL on port 465")
+
+    class FakeSMTPSSL:
+        def __init__(self, _host: str, _port: int, timeout: int = 30) -> None:
+            self.logged_in = False
+            self.sent_messages: list[EmailMessage] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def login(self, _user: str, _pw: str):
+            self.logged_in = True
+
+        def send_message(self, msg: EmailMessage):
+            self.sent_messages.append(msg)
+
+    fake_instances: list[FakeSMTPSSL] = []
+
+    def _smtp_ssl_factory(host: str, port: int, timeout: int = 30):
+        instance = FakeSMTPSSL(host, port, timeout=timeout)
+        fake_instances.append(instance)
+        return instance
+
+    monkeypatch.setattr("nanobot.channels.email.smtplib.SMTP", FakeSMTP)
+    monkeypatch.setattr("nanobot.channels.email.smtplib.SMTP_SSL", _smtp_ssl_factory)
+
+    cfg = _make_config()
+    cfg.smtp_port = 465
+    cfg.smtp_use_ssl = False
+    cfg.smtp_use_tls = True
+
+    channel = EmailChannel(cfg, MessageBus())
+    await channel.send(
+        OutboundMessage(
+            channel="email",
+            chat_id="alice@example.com",
+            content="hello",
+        )
+    )
+
+    assert len(fake_instances) == 1
+    assert fake_instances[0].logged_in is True
+    assert len(fake_instances[0].sent_messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_send_skips_reply_when_auto_reply_disabled(monkeypatch) -> None:
     """When auto_reply_enabled=False, replies should be skipped but proactive sends allowed."""
     class FakeSMTP:

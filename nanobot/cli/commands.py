@@ -411,11 +411,30 @@ def _make_provider(config: Config):
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.registry import find_by_name
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
+    defaults = config.agents.defaults
+    model = defaults.default_text_model or defaults.model
+
+    forced_text_provider = (defaults.default_text_provider or "").strip()
+    if forced_text_provider:
+        forced_spec = find_by_name(forced_text_provider)
+        if not forced_spec:
+            console.print(
+                f"[red]Error: Unknown defaultTextProvider '{defaults.default_text_provider}'.[/red]"
+            )
+            raise typer.Exit(1)
+        provider_name = forced_spec.name
+        p = getattr(config.providers, provider_name, None)
+    else:
+        provider_name = config.get_provider_name(model)
+        p = config.get_provider(model)
+
     spec = find_by_name(provider_name) if provider_name else None
     backend = spec.backend if spec else "openai_compat"
+    api_base = p.api_base if p and p.api_base else None
+    if not api_base and spec and (spec.is_gateway or spec.is_local):
+        api_base = spec.default_api_base or None
+    if not api_base:
+        api_base = config.get_api_base(model)
 
     # --- validation ---
     if backend == "azure_openai":
@@ -453,7 +472,7 @@ def _make_provider(config: Config):
 
         provider = AnthropicProvider(
             api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
+            api_base=api_base,
             default_model=model,
             extra_headers=p.extra_headers if p else None,
         )
@@ -462,13 +481,12 @@ def _make_provider(config: Config):
 
         provider = OpenAICompatProvider(
             api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
+            api_base=api_base,
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
         )
 
-    defaults = config.agents.defaults
     provider.generation = GenerationSettings(
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
@@ -680,7 +698,7 @@ def _run_gateway(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=config.agents.defaults.default_text_model or config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
         web_config=config.tools.web,
@@ -697,6 +715,7 @@ def _run_gateway(
         unified_session=config.agents.defaults.unified_session,
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+<<<<<<< HEAD
         tools_config=config.tools,
     )
 
@@ -994,7 +1013,7 @@ def agent(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=config.agents.defaults.default_text_model or config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
         web_config=config.tools.web,

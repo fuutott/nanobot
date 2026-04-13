@@ -81,6 +81,7 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         disabled_skills: list[str] | None = None,
+        enable_native_web_tools: bool = True,
     ):
         self.provider = provider
         self.workspace = workspace
@@ -92,6 +93,7 @@ class SubagentManager:
         self.restrict_to_workspace = restrict_to_workspace
         self.disabled_skills = set(disabled_skills or [])
         self.runner = AgentRunner(provider)
+        self.enable_native_web_tools = enable_native_web_tools
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -172,7 +174,7 @@ class SubagentManager:
                     path_append=self.exec_config.path_append,
                     allowed_env_keys=self.exec_config.allowed_env_keys,
                 ))
-            if self.web_config.enable:
+            if self.enable_native_web_tools:
                 tools.register(WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy))
                 tools.register(WebFetchTool(proxy=self.web_config.proxy))
             system_prompt = self._build_subagent_prompt()

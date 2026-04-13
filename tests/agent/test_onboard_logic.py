@@ -392,6 +392,20 @@ class TestProviderChannelInfo:
         # Should include at least some channels
         assert len(names) >= 0
 
+    def test_get_channel_info_includes_plugin_defined_configs(self):
+        from nanobot.channels.registry import discover_all
+        from nanobot.cli.onboard import _get_channel_info
+
+        # Ensure cached lookup observes current discovery state in this test process.
+        _get_channel_info.cache_clear()
+        info = _get_channel_info()
+        discovered = discover_all()
+
+        if "openaiapi" in discovered:
+            assert "openaiapi" in info
+        if "webui" in discovered:
+            assert "webui" in info
+
     def test_get_provider_info_returns_valid_structure(self):
         from nanobot.cli.onboard import _get_provider_info
 

@@ -34,3 +34,16 @@ Examples (replace `keyword`):
 - **Do NOT edit SOUL.md, USER.md, or MEMORY.md.** They are automatically managed by Dream.
 - If you notice outdated information, it will be corrected when Dream runs next.
 - Users can view Dream's activity with the `/dream-log` command.
+
+## When to Update MEMORY.md
+
+Write important facts immediately using `edit_file` to **add or update specific sections** — never use `write_file` on MEMORY.md, as that would destroy all existing memory:
+- User preferences ("I prefer dark mode")
+- Project context ("The API uses OAuth2")
+- Relationships ("Alice is the project lead")
+
+**MEMORY.md is cumulative.** Always preserve all existing content. Only append new facts or edit specific lines — never replace the whole file.
+
+## Auto-consolidation
+
+Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.

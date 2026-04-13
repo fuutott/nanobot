@@ -470,6 +470,50 @@ def test_make_provider_passes_extra_headers_to_custom_provider():
     assert kwargs["default_headers"]["x-session-affinity"] == "sticky-session"
 
 
+def test_make_provider_prefers_default_text_provider_and_model():
+    config = Config.model_validate(
+        {
+            "agents": {
+                "defaults": {
+                    "provider": "auto",
+                    "model": "z-ai/glm-5",
+                    "defaultTextModel": "z-ai/glm-5",
+                    "defaultTextProvider": "openrouter",
+                }
+            },
+            "providers": {
+                "openrouter": {
+                    "apiKey": "sk-or-test",
+                }
+            },
+        }
+    )
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
+        provider = _make_provider(config)
+
+    kwargs = mock_async_openai.call_args.kwargs
+    assert kwargs["base_url"] == "https://openrouter.ai/api/v1"
+    assert provider.get_default_model() == "z-ai/glm-5"
+
+
+def test_make_provider_raises_for_unknown_default_text_provider():
+    config = Config.model_validate(
+        {
+            "agents": {
+                "defaults": {
+                    "provider": "auto",
+                    "model": "gpt-4o-mini",
+                    "defaultTextProvider": "does-not-exist",
+                }
+            }
+        }
+    )
+
+    with pytest.raises(SystemExit):
+        _make_provider(config)
+
+
 @pytest.fixture
 def mock_agent_runtime(tmp_path):
     """Mock agent command dependencies for focused CLI tests."""

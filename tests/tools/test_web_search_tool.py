@@ -1,5 +1,6 @@
 """Tests for multi-provider web search."""
 
+import asyncio
 import httpx
 import pytest
 
@@ -281,3 +282,17 @@ async def test_duckduckgo_timeout_returns_error(monkeypatch):
     result = await tool.execute(query="test")
     gate.set()
     assert "Error" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_timeout_guard_wraps_provider_calls(monkeypatch):
+    tool = _tool(provider="duckduckgo")
+    tool.config.timeout = 1
+
+    async def _hang(*args, **kwargs):
+        await asyncio.sleep(3)
+        return "No results"
+
+    monkeypatch.setattr(tool, "_dispatch_search", _hang)
+    result = await tool.execute(query="timeout probe")
+    assert "timed out" in result

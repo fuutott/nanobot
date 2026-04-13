@@ -273,10 +273,10 @@ async def test_stop_is_safe_after_partial_start(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_message_ignores_self_messages() -> None:
-    # Self-loop guard: messages from this bot's own account must be dropped (#3217).
+async def test_on_message_ignores_bot_messages_without_mention() -> None:
+    # Bot-authored messages are ignored unless they explicitly mention this bot.
     channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
-    channel._bot_user_id = "999"  # simulate bot identity populated in on_ready()
+    channel._bot_user_id = "999"
     handled: list[dict] = []
     channel._handle_message = lambda **kwargs: handled.append(kwargs)  # type: ignore[method-assign]
 
@@ -286,8 +286,8 @@ async def test_on_message_ignores_self_messages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_message_accepts_messages_from_other_bots() -> None:
-    # Multi-agent setups: messages from OTHER bots must be processed, not dropped (#3217).
+async def test_on_message_accepts_bot_messages_with_explicit_mention() -> None:
+    # Other bots can trigger inbound handling only when they mention this bot.
     channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
     channel._bot_user_id = "999"
     handled: list[dict] = []
@@ -297,10 +297,35 @@ async def test_on_message_accepts_messages_from_other_bots() -> None:
 
     channel._handle_message = capture_handle  # type: ignore[method-assign]
 
-    await channel._on_message(_make_message(author_id=123, author_bot=True))
+    await channel._on_message(
+        _make_message(
+            author_bot=True,
+            content="<@999> ping",
+            mentions=[SimpleNamespace(id=999)],
+        )
+    )
 
     assert len(handled) == 1
-    assert handled[0]["sender_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_on_message_ignores_self_bot_message_even_with_mention() -> None:
+    # Self-authored bot messages are always ignored to prevent self-loops.
+    channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
+    channel._bot_user_id = "999"
+    handled: list[dict] = []
+    channel._handle_message = lambda **kwargs: handled.append(kwargs)  # type: ignore[method-assign]
+
+    await channel._on_message(
+        _make_message(
+            author_id=999,
+            author_bot=True,
+            content="<@999> self ping",
+            mentions=[SimpleNamespace(id=999)],
+        )
+    )
+
+    assert handled == []
 
 
 @pytest.mark.asyncio
@@ -837,6 +862,28 @@ def test_config_proxy_defaults_to_none() -> None:
     assert config.proxy is None
     assert config.proxy_username is None
     assert config.proxy_password is None
+
+
+def test_config_allow_from_coerces_int_ids() -> None:
+    config = DiscordConfig.model_validate(
+        {
+            "enabled": True,
+            "token": "token",
+            "allowFrom": [272701342768955393, "Lois#0595"],
+        }
+    )
+    assert config.allow_from == ["272701342768955393", "Lois#0595"]
+
+
+def test_config_allow_from_rejects_non_string_non_int_values() -> None:
+    with pytest.raises(Exception):
+        DiscordConfig.model_validate(
+            {
+                "enabled": True,
+                "token": "token",
+                "allowFrom": ["ok", {"bad": "value"}],
+            }
+        )
 
 
 @pytest.mark.asyncio
