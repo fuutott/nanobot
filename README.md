@@ -19,6 +19,21 @@
 
 📏 Real-time line count: run `bash core_agent_lines.sh` to verify anytime.
 
+## About This Fork
+
+This is a [personal fork](https://github.com/fuutott/nanobot) of [HKUDS/nanobot](https://github.com/HKUDS/nanobot) with a few extras on top. It tracks upstream closely and merges changes regularly.
+
+**What's different:**
+
+- **Plugin channels** — three new channel types you can install separately as plugins (see [Plugin Install How-To](./plugins-howto-install.md)):
+  - **Web UI** — a browser-based chat interface with login protection, so you can talk to your agent from any device without needing a chat app
+  - **OpenAI API** — an OpenAI-compatible HTTP endpoint (`/v1/chat/completions`) for hooking up existing tools, SDKs, and scripts
+  - **MCP Server** — expose your agent as an MCP server over Streamable HTTP, so any MCP-compatible client can call it as a tool
+- **Tighter Docker defaults** — `restrictToWorkspace` defaults to `true`; the container user is `nanobottie`; plugin packages are pre-installed in the image; extra ports (18791-18793) are exposed for the plugins
+- **Dev workflow scripts** — a `.gitsync/` folder with checkpoint, promote, and auto-watch scripts for safely syncing WIP across machines
+
+For plugin install instructions, see **[plugins-howto-install.md](./plugins-howto-install.md)**.
+
 ## 📢 News
 
 - **2026-04-14** 🚀 Released **v0.1.5.post1** — Dream skill discovery, mid-turn follow-up injection, WebSocket channel, and deeper channel integrations. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.5.post1) for details.
