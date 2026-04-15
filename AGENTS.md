@@ -2,14 +2,24 @@
 
 ## Git Sync Preferences
 
-When syncing with upstream (e.g. `git merge upstream/main`), always prefer local changes unless upstream explicitly makes them better or removes the need for them. On conflict, keep ours by default and evaluate upstream's version on its merits. If uncertain ask.
+Always prefer local changes over upstream unless upstream is clearly better or makes local changes redundant. On conflict, keep local by default and evaluate upstream on its merits. Never blindly merge. Use rebase, not merge.
 
-**Before merging**, always review what upstream is bringing in:
-1. Run `git log --oneline main...upstream/main` to see incoming commits.
-2. Run `git diff --stat main...upstream/main` to see affected files.
-3. Check for overlaps with local changes using `git diff main...upstream/main -- <files that also differ locally>`.
-4. If any file has both local and upstream changes, read the actual diff for that file before merging. Evaluate upstream's version on its merits — adopt it only if it's clearly better or makes local changes redundant.
-5. Do NOT blindly merge with `-X ours`. Only use conflict resolution strategies after understanding the actual changes.
+**Before rebasing**, always review what upstream is bringing in:
+1. `git fetch upstream`
+2. `git log --oneline main..upstream/main` — incoming commits
+3. `git diff --stat main...upstream/main` — affected files
+4. `git diff main...upstream/main -- <overlapping files>` — read actual diffs for any file changed both locally and upstream
+5. Do NOT use `-X ours` without understanding the changes.
+
+**After a clean rebase:** `git push origin main --force-with-lease`
+
+### Trigger phrase
+
+When the user posts a message matching:
+
+> "This branch is N commits ahead of and M commits behind HKUDS/nanobot:main."
+
+Run the full sync automatically (fetch → review → stash unstaged → rebase → pop stash → force-push origin) without asking for confirmation.
 
 ## Local testing
 
