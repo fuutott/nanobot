@@ -2,4 +2,5 @@
 
 docker rm -f nanobot-gateway 2>$null
 docker compose -f docker-compose.standalone.yml down
-docker compose -f docker-compose.standalone.yml up -d --build
+docker compose -f docker-compose.standalone.yml build --progress=plain --build-arg BUILD_BRIDGE=0
+docker compose -f docker-compose.standalone.yml up -d
