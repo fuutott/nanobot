@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 # Install Node.js 20 for the WhatsApp bridge
@@ -30,11 +31,18 @@ RUN uv pip install --system --no-cache '.[discord]' && \
             /app/plugins/nanobot-channel-openaiapi \
             /app/plugins/nanobot-channel-mcpserver
 
-# Build the WhatsApp bridge
+# Build the WhatsApp bridge (set BUILD_BRIDGE=0 to skip if you don't use WhatsApp)
+ARG BUILD_BRIDGE=1
 WORKDIR /app/bridge
-RUN git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/ && \
-    git config --global --add url."https://github.com/".insteadOf git@github.com: && \
-    npm install && npm run build
+RUN --mount=type=cache,target=/root/.npm \
+    if [ "$BUILD_BRIDGE" = "1" ]; then \
+        git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/ && \
+        git config --global --add url."https://github.com/".insteadOf git@github.com: && \
+        npm install --prefer-offline --no-audit --no-fund --fetch-timeout=600000 && \
+        npm run build; \
+    else \
+        echo "BUILD_BRIDGE=0: skipping WhatsApp bridge build"; \
+    fi
 WORKDIR /app
 
 # Create non-root user and config directory
