@@ -243,7 +243,6 @@ class AgentLoop:
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
-        self.enable_native_web_tools = enable_native_web_tools
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
@@ -259,7 +258,7 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             disabled_skills=disabled_skills,
-            enable_native_web_tools=self.enable_native_web_tools,
+            enable_native_web_tools=self.web_config.enable,
         )
         self._unified_session = unified_session
         self._running = False
@@ -366,7 +365,7 @@ class AgentLoop:
                     allowed_env_keys=self.exec_config.allowed_env_keys,
                 )
             )
-        if self.enable_native_web_tools:
+        if self.web_config.enable:
             self.tools.register(
                 WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy)
             )
