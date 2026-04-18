@@ -510,7 +510,9 @@ def test_make_provider_raises_for_unknown_default_text_provider():
         }
     )
 
-    with pytest.raises(SystemExit):
+    import click
+
+    with pytest.raises((SystemExit, click.exceptions.Exit)):
         _make_provider(config)
 
 
