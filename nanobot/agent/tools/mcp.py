@@ -423,6 +423,102 @@ class MCPPromptWrapper(Tool):
         return "(MCP prompt call failed)"  # Unreachable
 
 
+async def _resolve_oauth_token(name: str, cfg) -> str | None:
+    """Resolve an OAuth access token for an MCP server.
+
+    Follows MCP authorization spec:
+    1. Check for valid stored token
+    2. Try refresh token exchange
+    3. For client_credentials: silently obtain new token
+    4. For authorization_code / device_code: prompt user (return None, needs CLI auth)
+
+    Returns access token string or None if interactive auth is needed.
+    """
+    from nanobot.agent.tools.oauth_tokens import (
+        get_token,
+        get_refresh_token,
+        is_token_valid,
+    )
+    from nanobot.agent.tools.oauth_flow import (
+        discover_oauth_metadata,
+        _get_endpoints,
+        _authorization_base_url,
+        _resolve_env,
+        refresh_access_token,
+        store_token_result,
+        get_client_credentials_token,
+        load_registered_client,
+    )
+
+    # 1. Check stored token
+    if is_token_valid(name):
+        return get_token(name)
+
+    # 2. Discover endpoints (needed for refresh / client_credentials)
+    base_url = _authorization_base_url(cfg.url) if cfg.url else ""
+    metadata = await discover_oauth_metadata(cfg.url) if cfg.url else None
+    endpoints = _get_endpoints(metadata, base_url)
+
+    # Override with config values if set
+    token_endpoint = cfg.auth.token_endpoint or endpoints["token_endpoint"]
+
+    # 3. Try refresh first (works for all flows)
+    rt = get_refresh_token(name)
+    if rt:
+        # Need client_id — from config or dynamic registration
+        client_id = cfg.auth.client_id or ""
+        if not client_id:
+            reg = load_registered_client(name)
+            if reg:
+                client_id = reg.client_id
+
+        if client_id:
+            try:
+                logger.info("MCP '{}': refreshing OAuth token", name)
+                result = await refresh_access_token(
+                    token_endpoint=token_endpoint,
+                    refresh_token=rt,
+                    client_id=client_id,
+                    client_secret=_resolve_env(cfg.auth.client_secret) if cfg.auth.client_secret else None,
+                )
+                store_token_result(name, result)
+                return result.access_token
+            except Exception as e:
+                logger.warning("MCP '{}': token refresh failed: {}", name, e)
+
+    # 4. client_credentials: silent token acquisition
+    if cfg.auth.flow == "client_credentials":
+        client_id = cfg.auth.client_id or ""
+        client_secret = _resolve_env(cfg.auth.client_secret)
+        if not client_id or not client_secret:
+            logger.warning(
+                "MCP '{}': client_credentials requires client_id and client_secret",
+                name,
+            )
+            return None
+        try:
+            logger.info("MCP '{}': obtaining token via client_credentials", name)
+            result = await get_client_credentials_token(
+                token_endpoint=token_endpoint,
+                client_id=client_id,
+                client_secret=client_secret,
+                scopes=cfg.auth.scopes,
+            )
+            store_token_result(name, result)
+            return result.access_token
+        except Exception as e:
+            logger.warning("MCP '{}': client_credentials failed: {}", name, e)
+            return None
+
+    # 5. Interactive flows — cannot complete during auto-connect
+    logger.warning(
+        "MCP '{}': no valid token. Run 'nanobot mcp-auth {}' to authenticate.",
+        name,
+        name,
+    )
+    return None
+
+
 async def connect_mcp_servers(
     mcp_servers: dict, registry: ToolRegistry
 ) -> dict[str, AsyncExitStack]:
@@ -442,6 +538,11 @@ async def connect_mcp_servers(
         await server_stack.__aenter__()
 
         try:
+            # --- OAuth: resolve token if auth is configured ---
+            oauth_token: str | None = None
+            if cfg.auth:
+                oauth_token = await _resolve_oauth_token(name, cfg)
+
             transport_type = cfg.type
             if not transport_type:
                 if cfg.command:
@@ -454,6 +555,11 @@ async def connect_mcp_servers(
                     logger.warning("MCP server '{}': no command or url configured, skipping", name)
                     await server_stack.aclose()
                     return name, None
+
+            # Build auth headers: merge cfg.headers with OAuth bearer if present
+            base_headers = dict(cfg.headers or {})
+            if oauth_token:
+                base_headers["Authorization"] = f"Bearer {oauth_token}"
 
             if transport_type == "stdio":
                 command, args, env = _normalize_windows_stdio_command(
@@ -476,7 +582,7 @@ async def connect_mcp_servers(
                 ) -> httpx.AsyncClient:
                     merged_headers = {
                         "Accept": "application/json, text/event-stream",
-                        **(cfg.headers or {}),
+                        **base_headers,
                         **(headers or {}),
                     }
                     return httpx.AsyncClient(
@@ -492,7 +598,7 @@ async def connect_mcp_servers(
             elif transport_type == "streamableHttp":
                 http_client = await server_stack.enter_async_context(
                     httpx.AsyncClient(
-                        headers=cfg.headers or None,
+                        headers=base_headers or None,
                         follow_redirects=True,
                         timeout=None,
                     )

@@ -200,6 +200,29 @@ class ExecToolConfig(Base):
     sandbox: str = ""  # sandbox backend: "" (none) or "bwrap"
     allowed_env_keys: list[str] = Field(default_factory=list)  # Env var names to pass through to subprocess (e.g. ["GOPATH", "JAVA_HOME"])
 
+class OAuthConfig(Base):
+    """OAuth authentication configuration for MCP servers.
+
+    Follows MCP Authorization spec (2025-03-26) based on OAuth 2.1.
+
+    Most endpoints are discovered automatically via:
+    1. Server Metadata Discovery (RFC 8414) — /.well-known/oauth-authorization-server
+    2. Dynamic Client Registration (RFC 7591) — /register
+    3. Fallback defaults at the server's base URL
+
+    Config only needs to specify the grant type and any overrides.
+    """
+
+    flow: Literal["device_code", "authorization_code", "client_credentials"] = "device_code"
+    client_id: str = ""  # Optional: skip dynamic registration if set
+    client_secret: str = ""  # Supports ${ENV_VAR} references; only for client_credentials or confidential clients
+    scopes: list[str] = Field(default_factory=list)
+    # Manual endpoint overrides (skip discovery if set):
+    token_endpoint: str = ""
+    device_authorization_endpoint: str = ""
+    registration_endpoint: str = ""
+
+
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio, SSE, or streamable HTTP)."""
     type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
@@ -210,6 +233,7 @@ class MCPServerConfig(Base):
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
+    auth: OAuthConfig | None = None  # OAuth configuration for remote MCP servers
 
 class MyToolConfig(Base):
     """Self-inspection tool configuration."""

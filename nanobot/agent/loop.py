@@ -611,6 +611,7 @@ class AgentLoop:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
         await self._connect_mcp()
+        self._start_oauth_refresh_task()
         logger.info("Agent loop started")
 
         while self._running:
@@ -810,6 +811,100 @@ class AgentLoop:
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
         task.add_done_callback(self._background_tasks.remove)
+
+    def _start_oauth_refresh_task(self) -> None:
+        """Start background task that refreshes OAuth tokens before they expire."""
+        if not self._mcp_servers:
+            return
+        has_auth = any(
+            hasattr(cfg, "auth") and cfg.auth
+            for cfg in self._mcp_servers.values()
+        )
+        if not has_auth:
+            return
+        self._schedule_background(self._oauth_refresh_loop())
+
+    async def _oauth_refresh_loop(self) -> None:
+        """Periodically check and refresh OAuth tokens for MCP servers."""
+        from time import time
+
+        from nanobot.agent.tools.oauth_tokens import (
+            token_expires_at,
+            get_refresh_token,
+        )
+        from nanobot.agent.tools.oauth_flow import (
+            discover_oauth_metadata,
+            _get_endpoints,
+            _authorization_base_url,
+            refresh_access_token,
+            store_token_result,
+            get_client_credentials_token,
+            load_registered_client,
+            _resolve_env,
+        )
+
+        while self._running:
+            for name, cfg in self._mcp_servers.items():
+                if not hasattr(cfg, "auth") or not cfg.auth:
+                    continue
+                try:
+                    expires_at = token_expires_at(name)
+                    if expires_at is None:
+                        continue
+                    # Refresh 5 minutes before expiry
+                    if expires_at - time() > 300:
+                        continue
+
+                    logger.debug("OAuth token for '{}' expiring soon, refreshing...", name)
+
+                    # Discover endpoints
+                    base_url = _authorization_base_url(cfg.url) if cfg.url else ""
+                    metadata = await discover_oauth_metadata(cfg.url) if cfg.url else None
+                    endpoints = _get_endpoints(metadata, base_url)
+                    token_endpoint = cfg.auth.token_endpoint or endpoints["token_endpoint"]
+
+                    # Get client_id
+                    client_id = cfg.auth.client_id
+                    client_secret = _resolve_env(cfg.auth.client_secret) if cfg.auth.client_secret else None
+                    if not client_id:
+                        reg = load_registered_client(name)
+                        if reg:
+                            client_id = reg.client_id
+                            if reg.client_secret:
+                                client_secret = reg.client_secret
+
+                    if cfg.auth.flow == "client_credentials":
+                        if client_id and client_secret:
+                            result = await get_client_credentials_token(
+                                token_endpoint=token_endpoint,
+                                client_id=client_id,
+                                client_secret=client_secret,
+                                scopes=cfg.auth.scopes,
+                            )
+                            store_token_result(name, result)
+                            logger.info("OAuth token for '{}' refreshed (client_credentials)", name)
+                    else:
+                        rt = get_refresh_token(name)
+                        if rt and client_id:
+                            result = await refresh_access_token(
+                                token_endpoint=token_endpoint,
+                                refresh_token=rt,
+                                client_id=client_id,
+                                client_secret=client_secret,
+                            )
+                            store_token_result(name, result)
+                            logger.info("OAuth token for '{}' refreshed", name)
+                        else:
+                            logger.warning(
+                                "OAuth token for '{}' expiring and no refresh token. "
+                                "Run 'nanobot mcp-auth {}' to re-authenticate.",
+                                name, name,
+                            )
+                except Exception as e:
+                    logger.warning("OAuth refresh failed for '{}': {}", name, e)
+
+            # Check every 60 seconds
+            await asyncio.sleep(60)
 
     def stop(self) -> None:
         """Stop the agent loop."""
