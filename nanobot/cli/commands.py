@@ -1602,7 +1602,7 @@ async def _mcp_discover_and_register(server_name: str, cfg) -> dict:
 
     token_endpoint = cfg.auth.token_endpoint or endpoints["token_endpoint"]
     registration_endpoint = cfg.auth.registration_endpoint or endpoints.get("registration_endpoint", "")
-    device_endpoint = cfg.auth.device_authorization_endpoint or ""
+    device_endpoint = cfg.auth.device_authorization_endpoint or endpoints.get("device_authorization_endpoint", "")
 
     console.print(f"  Token:     [dim]{token_endpoint}[/dim]")
     if device_endpoint:
