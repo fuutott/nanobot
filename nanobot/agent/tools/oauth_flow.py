@@ -356,6 +356,7 @@ async def start_device_code_flow(
             "device_code": data["device_code"],
             "user_code": data["user_code"],
             "verification_uri": data["verification_uri"],
+            "verification_uri_complete": data.get("verification_uri_complete"),
             "expires_in": data.get("expires_in", 900),
             "interval": data.get("interval", 5),
         }
