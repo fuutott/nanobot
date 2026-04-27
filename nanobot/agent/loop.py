@@ -11,7 +11,6 @@ from contextlib import AsyncExitStack, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-import json_repair
 from loguru import logger
 
 from nanobot.agent.autocompact import AutoCompact
