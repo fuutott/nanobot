@@ -16,6 +16,18 @@ from nanobot.agent.tools.mcp import (
     _is_transient,
 )
 
+
+def _fake_conn(session):
+    """Wrap a mock session in a connection-shaped shim for wrapper tests.
+    `reconnect_if_stale` is a no-op AsyncMock by default; tests that care about
+    reconnect behaviour live in `test_mcp_reconnect.py`.
+    """
+    return SimpleNamespace(
+        session=session,
+        epoch=0,
+        reconnect_if_stale=AsyncMock(),
+    )
+
 # ---------------------------------------------------------------------------
 # _is_transient helper
 # ---------------------------------------------------------------------------
@@ -93,7 +105,7 @@ async def test_tool_retries_on_transient_error():
     exc = _FakeClosedResourceError("connection lost")
     session.call_tool = AsyncMock(side_effect=[exc, result])
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute(foo="bar")
@@ -110,7 +122,7 @@ async def test_tool_fails_after_retry_exhausted():
     exc2 = _FakeClosedResourceError("still dead again")
     session.call_tool = AsyncMock(side_effect=[exc1, exc2])
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -126,7 +138,7 @@ async def test_tool_no_retry_on_non_transient_error():
     session = AsyncMock()
     session.call_tool = AsyncMock(side_effect=ValueError("bad input"))
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
     output = await wrapper.execute()
 
     assert "ValueError" in output
@@ -140,7 +152,7 @@ async def test_tool_no_retry_on_timeout():
     session = AsyncMock()
     session.call_tool = AsyncMock(side_effect=asyncio.TimeoutError())
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
     output = await wrapper.execute()
 
     assert "timed out" in output
@@ -154,7 +166,7 @@ async def test_tool_success_on_first_try_no_retry():
     result = _make_tool_result("hello")
     session.call_tool = AsyncMock(return_value=result)
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
     output = await wrapper.execute()
 
     assert output == "hello"
@@ -175,7 +187,7 @@ async def test_tool_does_not_retry_on_cancelled_error():
     session = AsyncMock()
     session.call_tool = AsyncMock(side_effect=asyncio.CancelledError())
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         output = await wrapper.execute()
@@ -194,7 +206,7 @@ async def test_tool_retry_on_connection_reset():
         side_effect=[ConnectionResetError("reset by peer"), result]
     )
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -210,7 +222,7 @@ async def test_tool_retry_on_end_of_stream():
     result = _make_tool_result("back")
     session.call_tool = AsyncMock(side_effect=[_FakeEndOfStreamError("eof"), result])
 
-    wrapper = MCPToolWrapper(session, "test_server", _make_tool_def(), tool_timeout=5)
+    wrapper = MCPToolWrapper(_fake_conn(session), "test_server", _make_tool_def(), tool_timeout=5)
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -246,7 +258,7 @@ async def test_resource_retries_on_transient_error():
     exc = _FakeClosedResourceError("gone")
     session.read_resource = AsyncMock(side_effect=[exc, result])
 
-    wrapper = MCPResourceWrapper(session, "test_server", _make_resource_def())
+    wrapper = MCPResourceWrapper(_fake_conn(session), "test_server", _make_resource_def())
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -262,7 +274,7 @@ async def test_resource_fails_after_retry_exhausted():
     exc = _FakeClosedResourceError("dead")
     session.read_resource = AsyncMock(side_effect=[exc, exc])
 
-    wrapper = MCPResourceWrapper(session, "test_server", _make_resource_def())
+    wrapper = MCPResourceWrapper(_fake_conn(session), "test_server", _make_resource_def())
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -277,7 +289,7 @@ async def test_resource_no_retry_on_non_transient():
     session = AsyncMock()
     session.read_resource = AsyncMock(side_effect=RuntimeError("bad"))
 
-    wrapper = MCPResourceWrapper(session, "test_server", _make_resource_def())
+    wrapper = MCPResourceWrapper(_fake_conn(session), "test_server", _make_resource_def())
     output = await wrapper.execute()
 
     assert "RuntimeError" in output
@@ -315,7 +327,7 @@ async def test_prompt_retries_on_transient_error():
     exc = _FakeClosedResourceError("gone")
     session.get_prompt = AsyncMock(side_effect=[exc, result])
 
-    wrapper = MCPPromptWrapper(session, "test_server", _make_prompt_def())
+    wrapper = MCPPromptWrapper(_fake_conn(session), "test_server", _make_prompt_def())
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -331,7 +343,7 @@ async def test_prompt_fails_after_retry_exhausted():
     exc = _FakeClosedResourceError("dead")
     session.get_prompt = AsyncMock(side_effect=[exc, exc])
 
-    wrapper = MCPPromptWrapper(session, "test_server", _make_prompt_def())
+    wrapper = MCPPromptWrapper(_fake_conn(session), "test_server", _make_prompt_def())
 
     with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
         output = await wrapper.execute()
@@ -348,7 +360,7 @@ async def test_prompt_no_retry_on_mcp_error():
         side_effect=McpError(ErrorData(code=-1, message="not found"))
     )
 
-    wrapper = MCPPromptWrapper(session, "test_server", _make_prompt_def())
+    wrapper = MCPPromptWrapper(_fake_conn(session), "test_server", _make_prompt_def())
     output = await wrapper.execute()
 
     assert "not found" in output
@@ -361,7 +373,7 @@ async def test_prompt_no_retry_on_non_transient():
     session = AsyncMock()
     session.get_prompt = AsyncMock(side_effect=RuntimeError("bad"))
 
-    wrapper = MCPPromptWrapper(session, "test_server", _make_prompt_def())
+    wrapper = MCPPromptWrapper(_fake_conn(session), "test_server", _make_prompt_def())
     output = await wrapper.execute()
 
     assert "RuntimeError" in output

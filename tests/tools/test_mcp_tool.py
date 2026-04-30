@@ -4,6 +4,7 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,6 +18,16 @@ from nanobot.agent.tools.mcp import (
 )
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import MCPServerConfig
+
+
+def _fake_conn(session: object) -> SimpleNamespace:
+    """Wrap a mock session in a connection-shaped shim for wrapper tests.
+    Reconnect-specific behaviour is exercised in `test_mcp_reconnect.py`."""
+    return SimpleNamespace(
+        session=session,
+        epoch=0,
+        reconnect_if_stale=AsyncMock(),
+    )
 
 
 class _FakeTextContent:
@@ -114,7 +125,7 @@ def _make_wrapper(session: object, *, timeout: float = 0.1) -> MCPToolWrapper:
         description="demo tool",
         inputSchema={"type": "object", "properties": {}},
     )
-    return MCPToolWrapper(session, "test", tool_def, tool_timeout=timeout)
+    return MCPToolWrapper(_fake_conn(session), "test", tool_def, tool_timeout=timeout)
 
 
 def test_wrapper_preserves_non_nullable_unions() -> None:
@@ -574,7 +585,7 @@ def _make_resource_def(
 
 
 def _make_resource_wrapper(session: object, *, timeout: float = 0.1) -> MCPResourceWrapper:
-    return MCPResourceWrapper(session, "srv", _make_resource_def(), resource_timeout=timeout)
+    return MCPResourceWrapper(_fake_conn(session), "srv", _make_resource_def(), resource_timeout=timeout)
 
 
 def test_resource_wrapper_properties() -> None:
@@ -645,7 +656,7 @@ def _make_prompt_def(
 
 
 def _make_prompt_wrapper(session: object, *, timeout: float = 0.1) -> MCPPromptWrapper:
-    return MCPPromptWrapper(session, "srv", _make_prompt_def(), prompt_timeout=timeout)
+    return MCPPromptWrapper(_fake_conn(session), "srv", _make_prompt_def(), prompt_timeout=timeout)
 
 
 def test_prompt_wrapper_properties() -> None:

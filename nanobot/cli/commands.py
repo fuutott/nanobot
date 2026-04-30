@@ -1707,7 +1707,7 @@ async def _mcp_auth_device_code(server_name: str, cfg, force: bool) -> None:
 
     console.print("\n[bold]To authenticate, visit:[/bold]")
     console.print(f"  [cyan underline]{flow_data['verification_uri']}[/cyan underline]")
-    console.print(f"\nEnter code: [bold yellow]{flow_data['user_code']}[/bold]")
+    console.print(f"\nEnter code: [bold yellow]{flow_data['user_code']}[/bold yellow]")
     if flow_data.get("verification_uri_complete"):
         console.print("\n[dim]Or open this pre-filled link directly:[/dim]")
         console.print(f"  [cyan underline]{flow_data['verification_uri_complete']}[/cyan underline]")
