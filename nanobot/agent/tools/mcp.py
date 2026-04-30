@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import shutil
 from contextlib import AsyncExitStack
 from typing import Any
@@ -27,6 +28,15 @@ _TRANSIENT_EXC_NAMES: frozenset[str] = frozenset((
 ))
 
 _WINDOWS_SHELL_LAUNCHERS: frozenset[str] = frozenset(("npx", "npm", "pnpm", "yarn", "bunx"))
+
+# Characters allowed in tool names by model providers (Anthropic, OpenAI, etc.).
+# Replace anything outside [a-zA-Z0-9_-] with underscore and collapse runs.
+_SANITIZE_RE = re.compile(r"_+")
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize an MCP-derived name for model API compatibility."""
+    return _SANITIZE_RE.sub("_", re.sub(r"[^a-zA-Z0-9_-]", "_", name))
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -140,7 +150,7 @@ class MCPToolWrapper(Tool):
         # See `MCPConnection`. Tests can pass a SimpleNamespace shim with these.
         self._connection = connection
         self._original_name = tool_def.name
-        self._name = f"mcp_{server_name}_{tool_def.name}"
+        self._name = _sanitize_name(f"mcp_{server_name}_{tool_def.name}")
         self._description = tool_def.description or tool_def.name
         raw_schema = tool_def.inputSchema or {"type": "object", "properties": {}}
         self._parameters = _normalize_schema_for_openai(raw_schema)
@@ -239,7 +249,7 @@ class MCPResourceWrapper(Tool):
     def __init__(self, connection, server_name: str, resource_def, resource_timeout: int = 30):
         self._connection = connection
         self._uri = resource_def.uri
-        self._name = f"mcp_{server_name}_resource_{resource_def.name}"
+        self._name = _sanitize_name(f"mcp_{server_name}_resource_{resource_def.name}")
         desc = resource_def.description or resource_def.name
         self._description = f"[MCP Resource] {desc}\nURI: {self._uri}"
         self._parameters: dict[str, Any] = {
@@ -339,7 +349,7 @@ class MCPPromptWrapper(Tool):
     def __init__(self, connection, server_name: str, prompt_def, prompt_timeout: int = 30):
         self._connection = connection
         self._prompt_name = prompt_def.name
-        self._name = f"mcp_{server_name}_prompt_{prompt_def.name}"
+        self._name = _sanitize_name(f"mcp_{server_name}_prompt_{prompt_def.name}")
         desc = prompt_def.description or prompt_def.name
         self._description = (
             f"[MCP Prompt] {desc}\n"
@@ -752,9 +762,9 @@ async def connect_mcp_servers(
             registered_count = 0
             matched_enabled_tools: set[str] = set()
             available_raw_names = [tool_def.name for tool_def in tools.tools]
-            available_wrapped_names = [f"mcp_{name}_{tool_def.name}" for tool_def in tools.tools]
+            available_wrapped_names = [_sanitize_name(f"mcp_{name}_{tool_def.name}") for tool_def in tools.tools]
             for tool_def in tools.tools:
-                wrapped_name = f"mcp_{name}_{tool_def.name}"
+                wrapped_name = _sanitize_name(f"mcp_{name}_{tool_def.name}")
                 if (
                     not allow_all_tools
                     and tool_def.name not in enabled_tools
