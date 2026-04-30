@@ -89,12 +89,16 @@ Reference docs for subsystems not covered above:
 
 ## Upstream Sync Protocol
 
-When syncing with upstream (`HKUDS/nanobot`), **always prefer local changes** unless upstream is clearly better. Never blindly merge.
+This is a fork synced across multiple machines via plain `git pull` from `origin`. The cardinal rule: **never rewrite commits already on `origin/main`**. The canonical, machine-readable protocol lives in [AGENTS.md](AGENTS.md) — keep both files in sync.
 
-1. `git log --oneline main...upstream/main` — review incoming commits
-2. `git diff --stat main...upstream/main` — see affected files
-3. For files changed both locally and upstream, read the actual diff before deciding
-4. Use rebase (not merge). Do NOT use `-X ours` without understanding the changes.
+### Sync strategy: merge, not rebase
+
+We keep local customisations on top of `HKUDS/nanobot`. The right tool for syncing is **`git merge upstream/main`**, not `git rebase upstream/main`.
+
+Why merge, not rebase:
+- Rebase rewrites local SHAs → requires `--force-with-lease` → breaks every other machine's `git pull`.
+- Merge creates a new commit with `upstream/main` as a parent → git forever knows we have those upstream commits → `git log main..upstream/main` only shows truly new work → clean future syncs.
+- Fast-forward push to `origin/main` → downstream machines just `git pull`.
 
 ### Trigger phrase
 
@@ -105,11 +109,27 @@ When the user posts a message matching the pattern:
 **Automatically execute the full sync without asking:**
 
 1. `git fetch upstream` — get latest upstream commits
-2. `git log --oneline main..upstream/main` — show what's incoming
-3. `git diff --stat main...upstream/main` — show affected files
-4. For any file changed both locally and upstream, read the actual diffs
-5. Stash any unstaged changes (`git stash push -m "pre-rebase unstaged changes" -- <files>`)
-6. `git rebase upstream/main` — rebase; resolve conflicts preferring local unless upstream is clearly better
-7. `git stash pop` — restore stashed changes
-8. `git push origin main --force-with-lease` — sync the fork
-9. Report what happened (commits absorbed, any conflicts resolved, files affected)
+2. `git log --oneline main..upstream/main` — review incoming commits
+3. `git diff --stat main...upstream/main` — affected files
+4. For every file changed both locally and upstream: `git diff main...upstream/main -- <file>` — read both sides before deciding
+5. Stash any unstaged changes: `git stash push -m "pre-merge unstaged" -- <files>`
+6. `git merge upstream/main --no-ff --no-commit` — start the merge without committing
+7. Resolve conflicts: **prefer local by default**; accept upstream only when it is clearly better or makes local redundant. For Discord bot filtering, always keep the @ mention requirement.
+8. `git add` resolved files, then `git commit` with a message summarising what upstream brought in and what local customisations were preserved.
+9. `git stash pop` — restore stashed changes
+10. `git push origin main` — plain push, no force flag
+11. Report: commits absorbed, conflicts resolved, files affected.
+
+### What counts as a conflict worth reading
+
+Read the actual diff (step 4) for any file we've changed locally. Auto-merge is fine for files we haven't touched. Never use `-X ours` or `-X theirs` blindly.
+
+### What NOT to do
+
+- `git rebase upstream/main` — rewrites pushed SHAs, forces all downstream machines to reset
+- `git push --force` / `--force-with-lease` to `main` — forbidden unless a secret leaked or the tip is broken, and only after coordinating all machines
+- `git commit --amend` on any commit reachable from `origin/main`
+
+### Local customisations to preserve across every sync
+
+See [AGENTS.md](AGENTS.md) for the authoritative table. At time of writing: Discord @ mention requirement, `default_text_provider`/vision routing in `config/schema.py`, `dream.interval_h=8` default, `web.enable` `AliasChoices` alias, `defaultTextProvider` routing in `cli/commands.py`, plugin-channel deps (`fastapi`, `uvicorn`, `python-multipart`) in `pyproject.toml`.
