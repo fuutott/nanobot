@@ -4,7 +4,7 @@ import asyncio
 import os
 import re
 import shutil
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from typing import Any
 
 import httpx
@@ -216,11 +216,10 @@ class MCPToolWrapper(Tool):
                             return f"(MCP tool call failed; reconnect error: {type(re_exc).__name__})"
                         continue
                     # Second transient failure (post-reconnect) — give up.
-                    logger.error(
-                        "MCP tool '{}' failed after retry: {}: {}",
+                    logger.exception(
+                        "MCP tool '{}' failed after retry: {}",
                         self._name,
                         type(exc).__name__,
-                        exc,
                     )
                     return f"(MCP tool call failed after retry: {type(exc).__name__})"
                 logger.exception(
@@ -315,11 +314,10 @@ class MCPResourceWrapper(Tool):
                             )
                             return f"(MCP resource read failed; reconnect error: {type(re_exc).__name__})"
                         continue
-                    logger.error(
-                        "MCP resource '{}' failed after retry: {}: {}",
+                    logger.exception(
+                        "MCP resource '{}' failed after retry: {}",
                         self._name,
                         type(exc).__name__,
-                        exc,
                     )
                     return f"(MCP resource read failed after retry: {type(exc).__name__})"
                 logger.exception(
@@ -412,7 +410,7 @@ class MCPPromptWrapper(Tool):
                 logger.warning("MCP prompt '{}' was cancelled by server/SDK", self._name)
                 return "(MCP prompt call was cancelled)"
             except McpError as exc:
-                logger.error(
+                logger.exception(
                     "MCP prompt '{}' failed: code={} message={}",
                     self._name,
                     exc.error.code,
@@ -438,11 +436,10 @@ class MCPPromptWrapper(Tool):
                             )
                             return f"(MCP prompt call failed; reconnect error: {type(re_exc).__name__})"
                         continue
-                    logger.error(
-                        "MCP prompt '{}' failed after retry: {}: {}",
+                    logger.exception(
+                        "MCP prompt '{}' failed after retry: {}",
                         self._name,
                         type(exc).__name__,
-                        exc,
                     )
                     return f"(MCP prompt call failed after retry: {type(exc).__name__})"
                 logger.exception(
@@ -740,8 +737,8 @@ async def connect_mcp_servers(
     """Connect to configured MCP servers and register their tools, resources, prompts.
 
     Returns a dict mapping server name -> its dedicated AsyncExitStack.
-    Each server gets its own stack and runs in its own task to prevent
-    cancel scope conflicts when multiple MCP servers are configured.
+    Each server gets its own stack to prevent cancel scope conflicts
+    when multiple MCP servers are configured.
     """
 
     async def connect_single_server(name: str, cfg) -> tuple[str, AsyncExitStack | None]:
@@ -846,28 +843,20 @@ async def connect_mcp_servers(
                     " Hint: this looks like stdio protocol pollution. Make sure the MCP server writes "
                     "only JSON-RPC to stdout and sends logs/debug output to stderr instead."
                 )
-            logger.error("MCP server '{}': failed to connect: {}{}", name, e, hint)
-            try:
+            logger.exception("MCP server '{}': failed to connect: {}", name, hint)
+            with suppress(Exception):
                 await server_stack.aclose()
-            except Exception:
-                pass
             return name, None
 
     server_stacks: dict[str, AsyncExitStack] = {}
 
-    tasks: list[asyncio.Task] = []
     for name, cfg in mcp_servers.items():
-        task = asyncio.create_task(connect_single_server(name, cfg))
-        tasks.append(task)
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for i, result in enumerate(results):
-        name = list(mcp_servers.keys())[i]
-        if isinstance(result, BaseException):
-            if not isinstance(result, asyncio.CancelledError):
-                logger.error("MCP server '{}' connection task failed: {}", name, result)
-        elif result is not None and result[1] is not None:
+        try:
+            result = await connect_single_server(name, cfg)
+        except Exception as e:
+            logger.error("MCP server '{}' connection failed: {}", name, e)
+            continue
+        if result is not None and result[1] is not None:
             server_stacks[result[0]] = result[1]
 
     return server_stacks

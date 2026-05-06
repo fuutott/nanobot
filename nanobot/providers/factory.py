@@ -90,6 +90,17 @@ def make_provider(config: Config) -> LLMProvider:
             default_model=model,
             extra_headers=p.extra_headers if p else None,
         )
+    elif backend == "bedrock":
+        from nanobot.providers.bedrock_provider import BedrockProvider
+
+        provider = BedrockProvider(
+            api_key=p.api_key if p else None,
+            api_base=p.api_base if p else None,
+            default_model=model,
+            region=getattr(p, "region", None) if p else None,
+            profile=getattr(p, "profile", None) if p else None,
+            extra_body=p.extra_body if p else None,
+        )
     else:
         from nanobot.providers.openai_compat_provider import OpenAICompatProvider
 
@@ -115,6 +126,7 @@ def provider_signature(config: Config) -> tuple[object, ...]:
     """Return the config fields that affect the primary LLM provider."""
     model, provider_name, _, _ = _resolve_text_provider(config)
     defaults = config.agents.defaults
+    p = config.get_provider(model)
     return (
         model,
         defaults.provider,
@@ -122,6 +134,10 @@ def provider_signature(config: Config) -> tuple[object, ...]:
         provider_name,
         config.get_api_key(model),
         config.get_api_base(model),
+        p.extra_headers if p else None,
+        p.extra_body if p else None,
+        getattr(p, "region", None) if p else None,
+        getattr(p, "profile", None) if p else None,
         defaults.max_tokens,
         defaults.temperature,
         defaults.reasoning_effort,

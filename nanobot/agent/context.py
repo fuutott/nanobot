@@ -3,6 +3,7 @@
 import base64
 import mimetypes
 import platform
+from contextlib import suppress
 from importlib.resources import files as pkg_files
 from pathlib import Path
 from typing import Any
@@ -84,8 +85,8 @@ class ContextBuilder:
         channel: str | None,
         chat_id: str | None,
         timezone: str | None = None,
-        sender_id: str | None = None,
         session_summary: str | None = None,
+        sender_id: str | None = None,
     ) -> str:
         """Build untrusted runtime metadata block for injection before the user message."""
         lines = [f"Current Time: {current_time_str(timezone)}"]
@@ -126,12 +127,10 @@ class ContextBuilder:
     @staticmethod
     def _is_template_content(content: str, template_path: str) -> bool:
         """Check if *content* is identical to the bundled template (user hasn't customized it)."""
-        try:
+        with suppress(Exception):
             tpl = pkg_files("nanobot") / "templates" / template_path
             if tpl.is_file():
                 return content.strip() == tpl.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
         return False
 
     def build_messages(
@@ -142,17 +141,17 @@ class ContextBuilder:
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
-        sender_id: str | None = None,
         current_role: str = "user",
         session_summary: str | None = None,
+        sender_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(
             channel,
             chat_id,
             self.timezone,
-            sender_id=sender_id,
             session_summary=session_summary,
+            sender_id=sender_id,
         )
         user_content = self._build_user_content(current_message, media)
 
