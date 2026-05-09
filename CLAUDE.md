@@ -133,3 +133,7 @@ Read the actual diff (step 4) for any file we've changed locally. Auto-merge is 
 ### Local customisations to preserve across every sync
 
 See [AGENTS.md](AGENTS.md) for the authoritative table. At time of writing: Discord @ mention requirement, `default_text_provider`/vision routing in `config/schema.py`, `dream.interval_h=8` default, `web.enable` `AliasChoices` alias, `defaultTextProvider` routing in `cli/commands.py`, plugin-channel deps (`fastapi`, `uvicorn`, `python-multipart`) in `pyproject.toml`.
+
+## Upstream AI-contributor docs
+
+Upstream now ships [`.agent/design.md`](.agent/design.md), [`.agent/security.md`](.agent/security.md), and [`.agent/gotchas.md`](.agent/gotchas.md) — read these for architecture/security/gotcha context that is not in this file.
