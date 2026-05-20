@@ -819,7 +819,8 @@ class AgentLoop:
         logger.info("Agent loop started")
 
         _diag_tick = 0  # [DIAG]
-        while self._running:
+        try:  # [DIAG] catches BaseException (incl. CancelledError, BaseExceptionGroup from anyio)
+         while self._running:
             _diag_tick += 1  # [DIAG]
             if _diag_tick % 30 == 0:  # [DIAG] ~once per 30s when idle
                 logger.info(  # [DIAG]
@@ -906,6 +907,11 @@ class AgentLoop:
                 if t in self._active_tasks.get(k, [])
                 else None
             )
+        except BaseException as e:  # [DIAG] catches CancelledError + BaseExceptionGroup (anyio)
+            logger.exception("[DIAG] run() exiting due to {}: {}", type(e).__name__, e)  # [DIAG]
+            raise  # [DIAG]
+        finally:  # [DIAG]
+            logger.info("[DIAG] run() exited: running={} tick={}", self._running, _diag_tick)  # [DIAG]
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
