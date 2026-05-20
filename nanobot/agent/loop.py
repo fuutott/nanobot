@@ -636,11 +636,17 @@ class AgentLoop:
         Returns the total number of cancelled tasks + subagents.
         """
         tasks = self._active_tasks.pop(key, [])
+        logger.info("[DIAG] _cancel_active_tasks START: key={} task_count={}", key, len(tasks))  # [DIAG]
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
-        for t in tasks:
+        logger.info("[DIAG] _cancel_active_tasks cancel() called on {} task(s)", cancelled)  # [DIAG]
+        for i, t in enumerate(tasks):  # [DIAG] indexed loop for log clarity
+            logger.info("[DIAG] _cancel_active_tasks awaiting task {}/{} done={}", i + 1, len(tasks), t.done())  # [DIAG]
             with suppress(asyncio.CancelledError, Exception):
                 await t
+            logger.info("[DIAG] _cancel_active_tasks awaited task {}/{}", i + 1, len(tasks))  # [DIAG]
+        logger.info("[DIAG] _cancel_active_tasks awaiting subagent cancel for {}", key)  # [DIAG]
         sub_cancelled = await self.subagents.cancel_by_session(key)
+        logger.info("[DIAG] _cancel_active_tasks END: total={}", cancelled + sub_cancelled)  # [DIAG]
         return cancelled + sub_cancelled
 
     def _effective_session_key(self, msg: InboundMessage) -> str:
@@ -812,14 +818,26 @@ class AgentLoop:
         self._start_oauth_refresh_task()
         logger.info("Agent loop started")
 
+        _diag_tick = 0  # [DIAG]
         while self._running:
+            _diag_tick += 1  # [DIAG]
+            if _diag_tick % 30 == 0:  # [DIAG] ~once per 30s when idle
+                logger.info(  # [DIAG]
+                    "[DIAG] run() alive: inbound_qsize={}, pending_sessions={}, active_tasks={}",  # [DIAG]
+                    self.bus.inbound_size,  # [DIAG]
+                    list(self._pending_queues.keys()),  # [DIAG]
+                    {k: len(v) for k, v in self._active_tasks.items() if v},  # [DIAG]
+                )  # [DIAG]
             try:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
             except asyncio.TimeoutError:
-                self.auto_compact.check_expired(
-                    self._schedule_background,
-                    active_session_keys=self._pending_queues.keys(),
-                )
+                try:  # [DIAG] wrap so check_expired exception can't kill run()
+                    self.auto_compact.check_expired(
+                        self._schedule_background,
+                        active_session_keys=self._pending_queues.keys(),
+                    )
+                except Exception:  # [DIAG]
+                    logger.exception("[DIAG] auto_compact.check_expired failed")  # [DIAG]
                 continue
             except asyncio.CancelledError:
                 # Preserve real task cancellation so shutdown can complete cleanly.
@@ -831,12 +849,18 @@ class AgentLoop:
                 logger.warning("Error consuming inbound message: {}, continuing...", e)
                 continue
 
+            logger.info(  # [DIAG]
+                "[DIAG] bus consumed: channel={} sender={} chat={} content={!r}",  # [DIAG]
+                msg.channel, msg.sender_id, msg.chat_id, msg.content[:80],  # [DIAG]
+            )  # [DIAG]
             raw = msg.content.strip()
             if self.commands.is_priority(raw):
+                logger.info("[DIAG] priority inline dispatch START: {!r}", raw)  # [DIAG]
                 await self._dispatch_command_inline(
                     msg, msg.session_key, raw,
                     self.commands.dispatch_priority,
                 )
+                logger.info("[DIAG] priority inline dispatch END: {!r}", raw)  # [DIAG]
                 continue
             effective_key = self._effective_session_key(msg)
             # If this session already has an active pending queue (i.e. a task
@@ -846,10 +870,12 @@ class AgentLoop:
                 # Non-priority commands must not be queued for injection;
                 # dispatch them directly (same pattern as priority commands).
                 if self.commands.is_dispatchable_command(raw):
+                    logger.info("[DIAG] dispatchable inline dispatch START: {!r}", raw)  # [DIAG]
                     await self._dispatch_command_inline(
                         msg, effective_key, raw,
                         self.commands.dispatch,
                     )
+                    logger.info("[DIAG] dispatchable inline dispatch END: {!r}", raw)  # [DIAG]
                     continue
                 pending_msg = msg
                 if effective_key != msg.session_key:
