@@ -15,17 +15,20 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Install Python dependencies first (cached layer)
-COPY pyproject.toml README.md LICENSE hatch_build.py ./
+# Install Python dependencies first (cached layer). Hatch reads the custom build
+# hook from hatch_build.py even for this metadata-only install.
+COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
-    uv pip install --system --no-cache '.[discord]' && \
+    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache '.[discord]' && \
     rm -rf nanobot bridge
 
 # Copy the full source and install
 COPY nanobot/ nanobot/
 COPY bridge/ bridge/
+COPY webui/ webui/
 COPY plugins/ plugins/
-RUN uv pip install --system --no-cache '.[discord]' && \
+# Skip the upstream hatch webui build — plugin nanobot-channel-webui ships its own dist.
+RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache '.[discord]' && \
         uv pip install --system --no-cache \
             /app/plugins/nanobot-channel-webui \
             /app/plugins/nanobot-channel-openaiapi \
@@ -56,11 +59,8 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/ent
 USER nanobottie
 ENV HOME=/home/nanobottie
 
-# Gateway default port
-EXPOSE 18790
-EXPOSE 18791
-EXPOSE 18792
-EXPOSE 18793
+# Gateway default port + plugin channel ports + optional WebSocket channel port
+EXPOSE 18790 18791 18792 18793 8765
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["status"]

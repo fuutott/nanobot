@@ -572,6 +572,7 @@ async def test_github_copilot_provider_refreshes_client_api_key_before_chat():
 
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI", return_value=mock_client):
         provider = GitHubCopilotProvider(default_model="github-copilot/gpt-4")
+        await provider._ensure_client()
 
     provider._get_copilot_access_token = AsyncMock(return_value="copilot-access-token")
 
@@ -611,7 +612,8 @@ def test_make_provider_passes_extra_headers_to_custom_provider():
     )
 
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
-        make_provider(config)
+        provider = make_provider(config)
+        asyncio.run(provider._ensure_client())
 
     kwargs = mock_async_openai.call_args.kwargs
     assert kwargs["api_key"] == "test-key"
@@ -639,11 +641,10 @@ def test_make_provider_prefers_default_text_provider_and_model():
         }
     )
 
-    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
-        provider = make_provider(config)
+    provider = make_provider(config)
 
-    kwargs = mock_async_openai.call_args.kwargs
-    assert kwargs["base_url"] == "https://openrouter.ai/api/v1"
+    # OpenAI client is lazy-init (perf optimization), so inspect effective base directly.
+    assert provider._effective_base == "https://openrouter.ai/api/v1"
     assert provider.get_default_model() == "z-ai/glm-5"
 
 
@@ -1214,6 +1215,7 @@ def test_gateway_cron_evaluator_receives_scheduled_reminder_context(
             self.model = "test-model"
             self.provider = kwargs.get("provider", object())
             self.tools = {}
+            seen["agent"] = self
 
         async def process_direct(self, *_args, **_kwargs):
             return OutboundMessage(
@@ -1262,6 +1264,11 @@ def test_gateway_cron_evaluator_receives_scheduled_reminder_context(
     assert isinstance(cron, _FakeCron)
     assert cron.on_job is not None
 
+    runtime_provider = object()
+    agent = seen["agent"]
+    agent.provider = runtime_provider
+    agent.model = "runtime-model"
+
     job = CronJob(
         id="cron-1",
         name="stretch",
@@ -1277,8 +1284,8 @@ def test_gateway_cron_evaluator_receives_scheduled_reminder_context(
 
     assert response == "Time to stretch."
     assert seen["response"] == "Time to stretch."
-    assert seen["provider"] is provider
-    assert seen["model"] == "test-model"
+    assert seen["provider"] is runtime_provider
+    assert seen["model"] == "runtime-model"
     assert seen["task_context"] == (
         "The scheduled time has arrived. Deliver this reminder to the user now, "
         "as a brief and natural message in their language. Speak directly to them — "
@@ -1586,6 +1593,9 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
             self.provider = object()
             self.dream = _FakeDream()
             self.sessions = _FakeSessionManager()
+
+        def llm_runtime(self) -> None:
+            return None
 
         async def run(self) -> None:
             await asyncio.Event().wait()

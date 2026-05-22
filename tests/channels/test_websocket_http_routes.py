@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -140,6 +141,75 @@ async def test_sessions_routes_require_bearer_token(
 
 
 @pytest.mark.asyncio
+async def test_cli_apps_routes_require_token_and_return_payload(
+    bus: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "nanobot.channels.websocket.cli_apps_payload",
+        lambda: {
+            "apps": [
+                {
+                    "name": "gimp",
+                    "display_name": "GIMP",
+                    "category": "image",
+                    "description": "Image editing",
+                    "requires": "Python",
+                    "source": "harness",
+                    "entry_point": "cli-anything-gimp",
+                    "install_supported": True,
+                    "installed": False,
+                    "available": False,
+                    "status": "not_installed",
+                    "logo_url": None,
+                    "brand_color": None,
+                    "skill_installed": False,
+                }
+            ],
+            "installed_count": 0,
+            "catalog_updated_at": "2026-04-18",
+        },
+    )
+    monkeypatch.setattr(
+        "nanobot.channels.websocket.cli_apps_action",
+        lambda action, query: {
+            "apps": [],
+            "installed_count": 1,
+            "catalog_updated_at": "2026-04-18",
+            "last_action": {"ok": True, "message": f"{action}:{query['name'][0]}"},
+        },
+    )
+    channel = _ch(bus, session_manager=_seed_session(tmp_path), port=29912)
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    try:
+        deny = await _http_get("http://127.0.0.1:29912/api/settings/cli-apps")
+        assert deny.status_code == 401
+
+        boot = await _http_get("http://127.0.0.1:29912/webui/bootstrap")
+        token = boot.json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+
+        catalog = await _http_get(
+            "http://127.0.0.1:29912/api/settings/cli-apps",
+            headers=auth,
+        )
+        assert catalog.status_code == 200
+        assert catalog.json()["apps"][0]["name"] == "gimp"
+
+        installed = await _http_get(
+            "http://127.0.0.1:29912/api/settings/cli-apps/install?name=gimp",
+            headers=auth,
+        )
+        assert installed.status_code == 200
+        assert installed.json()["last_action"]["message"] == "install:gimp"
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
 async def test_sessions_list_only_returns_websocket_sessions_by_default(
     bus: MagicMock, tmp_path: Path
 ) -> None:
@@ -177,12 +247,61 @@ async def test_sessions_list_only_returns_websocket_sessions_by_default(
 
 
 @pytest.mark.asyncio
+async def test_webui_sidebar_state_routes_are_config_dir_scoped(
+    bus: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("nanobot.config.paths.get_data_dir", lambda: tmp_path)
+    sm = _seed_session(tmp_path, key="websocket:sidebar")
+    channel = _ch(bus, session_manager=sm, port=29911)
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    try:
+        boot = await _http_get("http://127.0.0.1:29911/webui/bootstrap")
+        token = boot.json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+
+        initial = await _http_get(
+            "http://127.0.0.1:29911/api/webui/sidebar-state",
+            headers=auth,
+        )
+        assert initial.status_code == 200
+        assert initial.json()["schema_version"] == 1
+        assert initial.json()["pinned_keys"] == []
+
+        payload = {
+            "pinned_keys": ["websocket:sidebar"],
+            "archived_keys": ["websocket:old"],
+            "title_overrides": {"websocket:sidebar": "Pinned work"},
+            "view": {"density": "compact", "show_archived": True},
+        }
+        query = urlencode({"state": json.dumps(payload)})
+        updated = await _http_get(
+            f"http://127.0.0.1:29911/api/webui/sidebar-state/update?{query}",
+            headers=auth,
+        )
+        assert updated.status_code == 200
+        body = updated.json()
+        assert body["pinned_keys"] == ["websocket:sidebar"]
+        assert body["title_overrides"] == {"websocket:sidebar": "Pinned work"}
+        assert body["view"]["density"] == "compact"
+
+        state_path = tmp_path / "webui" / "sidebar-state.json"
+        assert state_path.is_file()
+        assert json.loads(state_path.read_text(encoding="utf-8"))["pinned_keys"] == [
+            "websocket:sidebar"
+        ]
+    finally:
+        await channel.stop()
+        await server_task
+
+
+@pytest.mark.asyncio
 async def test_session_delete_removes_file(
     bus: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("nanobot.config.paths.get_data_dir", lambda: tmp_path)
     sm = _seed_session(tmp_path, key="websocket:doomed")
-    from nanobot.utils.webui_transcript import append_transcript_object
+    from nanobot.webui.transcript import append_transcript_object
 
     append_transcript_object("websocket:doomed", {"event": "user", "chat_id": "doomed", "text": "x"})
     channel = _ch(bus, session_manager=sm, port=29903)

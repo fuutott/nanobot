@@ -103,3 +103,4 @@ plugin-migration-plan.md
 .claude/settings.json
 .claude/settings.local.json
 .kilo/package-lock.json
+exp/

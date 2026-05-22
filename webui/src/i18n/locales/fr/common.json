@@ -9,6 +9,18 @@
       "title": "Impossible de joindre nanobot",
       "gatewayHint": "Assurez-vous que la gateway est en cours d’exécution (`nanobot gateway`) et que cette page est ouverte sur la même machine."
     },
+    "auth": {
+      "title": "Authentification requise",
+      "hint": "Saisissez le secret configuré comme tokenIssueSecret dans la configuration de votre gateway.",
+      "placeholder": "Mot de passe",
+      "submit": "Se connecter",
+      "invalid": "Mot de passe invalide. Réessayez."
+    },
+    "account": {
+      "section": "Compte",
+      "logoutHint": "Déconnecter ce navigateur du gateway.",
+      "logout": "Se déconnecter"
+    },
     "system": {
       "section": "Système",
       "restartHint": "Redémarrez nanobot pour appliquer les changements d’exécution.",
@@ -27,9 +39,24 @@
     }
   },
   "sidebar": {
+    "navigation": "Navigation de la barre latérale",
+    "globalActions": "Actions globales",
     "collapse": "Réduire la barre latérale",
     "toggleTheme": "Changer de thème",
+    "home": "Accueil",
     "newChat": "Nouvelle discussion",
+    "searchAria": "Rechercher",
+    "viewOptions": "View",
+    "compactList": "Compact list",
+    "showPreviews": "Show previews",
+    "showTimestamps": "Show time",
+    "sortLabel": "Sort",
+    "sortUpdated": "Recently updated",
+    "sortCreated": "Recently created",
+    "sortTitle": "Title A-Z",
+    "searchPlaceholder": "Rechercher",
+    "searchResults": "Résultats",
+    "noSearchResults": "Aucun chat correspondant.",
     "recent": "Récentes",
     "refreshSessions": "Actualiser les sessions",
     "settings": "Paramètres",
@@ -46,12 +73,31 @@
     },
     "nav": {
       "general": "Général",
-      "byok": "BYOK"
+      "byok": "BYOK",
+      "overview": "Overview",
+      "appearance": "Appearance",
+      "models": "Models",
+      "providers": "Providers",
+      "image": "Image",
+      "web": "Web",
+      "runtime": "Runtime",
+      "advanced": "Advanced"
     },
     "sections": {
       "interface": "Interface",
       "ai": "IA",
-      "system": "Système"
+      "system": "Système",
+      "status": "Status",
+      "localPreferences": "Local preferences",
+      "presets": "Presets",
+      "imageGeneration": "Génération d'images",
+      "imageDefaults": "Valeurs par défaut",
+      "webSearch": "Web search",
+      "webBehavior": "Behavior",
+      "identity": "Identity",
+      "safety": "Safety",
+      "capabilities": "Capacités",
+      "integrations": "Integrations"
     },
     "rows": {
       "theme": "Thème",
@@ -59,31 +105,106 @@
       "provider": "Fournisseur",
       "model": "Modèle",
       "restart": "Redémarrer nanobot",
-      "configPath": "Chemin de configuration"
+      "configPath": "Chemin de configuration",
+      "activePreset": "Active preset",
+      "gateway": "Gateway",
+      "restartState": "Restart state",
+      "pendingChanges": "Modifications en attente",
+      "selectedPreset": "Selected preset",
+      "presetModel": "Preset model",
+      "density": "Density",
+      "activityMode": "Activity detail",
+      "codeWrap": "Code wrapping",
+      "maxResults": "Max results",
+      "timeout": "Timeout",
+      "jinaReader": "Jina reader",
+      "imageGeneration": "Génération d'images",
+      "imageProvider": "Fournisseur d'images",
+      "imageProviderStatus": "État du fournisseur",
+      "imageProviderBase": "Base du fournisseur",
+      "imageModel": "Modèle d'image",
+      "defaultAspectRatio": "Format par défaut",
+      "defaultImageSize": "Taille par défaut",
+      "maxImagesPerTurn": "Nombre max. d'images par tour",
+      "imageSaveDir": "Répertoire de sauvegarde",
+      "botName": "Bot name",
+      "botIcon": "Bot icon",
+      "timezone": "Timezone",
+      "toolHintMaxLength": "Tool hint length",
+      "workspacePath": "Workspace path",
+      "heartbeat": "Heartbeat",
+      "dream": "Dream",
+      "unifiedSession": "Unified session",
+      "restrictWorkspace": "Restrict to workspace",
+      "execTool": "Exec tool",
+      "execSandbox": "Exec sandbox",
+      "ssrfWhitelist": "SSRF whitelist",
+      "mcpServers": "MCP servers",
+      "pathAppend": "PATH append",
+      "configurationDocs": "Configuration docs"
     },
     "help": {
       "theme": "Basculer entre les apparences claire et sombre.",
       "language": "Choisissez la langue utilisée par le WebUI.",
       "provider": "Sélectionnez le fournisseur des nouvelles requêtes de modèle.",
       "model": "Définissez le nom du modèle par défaut utilisé par nanobot.",
-      "configPath": "Le fichier de configuration actuellement utilisé par la passerelle."
+      "configPath": "Le fichier de configuration actuellement utilisé par la passerelle.",
+      "selectedPreset": "Named presets are read-only here; edit them in config.json.",
+      "presetModel": "Switch to Default to edit model and provider from the WebUI.",
+      "density": "Stored only in this browser.",
+      "activityMode": "Choose how much agent activity chrome to show by default.",
+      "codeWrap": "Keep long code lines readable on smaller screens.",
+      "maxResults": "Results returned by each web_search call.",
+      "timeout": "Seconds before a search provider request times out.",
+      "jinaReader": "Use Jina Reader for web_fetch when available.",
+      "imageGeneration": "Expose generate_image dans les chats lorsqu’un fournisseur d’images configuré est disponible.",
+      "imageProvider": "Choisissez le fournisseur du registre utilisé par generate_image.",
+      "imageProviderStatus": "La génération d’images réutilise les identifiants de Fournisseurs.",
+      "imageModel": "Nom du modèle envoyé au fournisseur d’images sélectionné.",
+      "defaultAspectRatio": "Utilisé lorsque le prompt ne choisit pas de format.",
+      "defaultImageSize": "Indication de taille envoyée aux fournisseurs qui la prennent en charge.",
+      "maxImagesPerTurn": "Limite supérieure pour une requête generate_image.",
+      "botName": "Shown in runtime surfaces that use the configured bot identity.",
+      "botIcon": "Short emoji or text shown beside the bot name.",
+      "timezone": "IANA timezone used by runtime context and schedules.",
+      "toolHintMaxLength": "Maximum characters shown in tool progress hints.",
+      "advancedReadOnly": "Advanced safety controls are read-only in WebUI. Edit config.json intentionally when needed."
     },
     "values": {
       "light": "Clair",
       "dark": "Sombre",
-      "notAvailable": "Indisponible"
+      "notAvailable": "Indisponible",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "restartPending": "Redémarrage en attente",
+      "ready": "Prêt",
+      "comfortable": "Comfortable",
+      "compact": "Compact",
+      "auto": "Auto",
+      "expanded": "Expanded",
+      "on": "On",
+      "off": "Off",
+      "configured": "Configured",
+      "notConfigured": "Not configured",
+      "restartRequired": "Restart required",
+      "liveReload": "Live reload ready"
     },
     "status": {
       "loading": "Chargement des paramètres...",
       "loadError": "Impossible de charger les paramètres",
       "unsaved": "Modifications non enregistrées.",
-      "savedRestart": "Enregistré. Redémarrez nanobot pour appliquer."
+      "upToDate": "À jour.",
+      "savedRestart": "Enregistré. Redémarrez nanobot pour appliquer.",
+      "restartAfterSaving": "Enregistrez les modifications, puis redémarrez lorsque vous êtes prêt.",
+      "savedRestartApply": "Enregistré. Redémarrez lorsque vous êtes prêt.",
+      "imageProviderRestart": "Modifications du fournisseur d’images enregistrées. Redémarrez lorsque vous êtes prêt."
     },
     "actions": {
       "save": "Enregistrer",
       "saving": "Enregistrement",
       "edit": "Modifier",
-      "cancel": "Annuler"
+      "cancel": "Annuler",
+      "openDocs": "Open docs"
     },
     "byok": {
       "description": "Utilisez vos propres clés de fournisseur. Nanobot lit ces valeurs depuis la configuration actuelle, et seuls les fournisseurs configurés peuvent être sélectionnés dans Général.",
@@ -126,15 +247,59 @@
         "missingCredential": "Ajoutez l'identifiant requis avant d'enregistrer.",
         "saveHint": "Les changements s'appliquent aux nouvelles requêtes web search."
       }
+    },
+    "overview": {
+      "model": "Current model",
+      "providers": "Providers",
+      "configuredCount": "{{count}} configured",
+      "totalProviders": "{{count}} available",
+      "webSearch": "Web search",
+      "imageGeneration": "Génération d'images",
+      "workspace": "Workspace"
+    },
+    "providers": {
+      "searchPlaceholder": "Search providers",
+      "noMatches": "No providers match this search."
+    },
+    "image": {
+      "selectProvider": "Sélectionner un fournisseur",
+      "selectAspect": "Sélectionner un format",
+      "selectSize": "Sélectionner une taille",
+      "configureProvider": "Configurer le fournisseur",
+      "missingCredential": "Configurez ce fournisseur avant d’activer la génération d’images."
     }
   },
   "chat": {
     "fallbackTitle": "Discussion {{id}}",
     "loading": "Chargement…",
     "noSessions": "Aucune session pour le moment.",
+    "showMore": "Afficher {{count}} de plus",
     "actions": "Actions de la discussion {{title}}",
+    "activity": {
+      "running": "Agent running",
+      "complete": "Agent finished"
+    },
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "rename": "Rename",
+    "renameTitle": "Rename chat",
+    "renameDescription": "Choose a local sidebar name for this chat.",
+    "renamePlaceholder": "Chat name",
+    "renameSave": "Save",
+    "archive": "Archive",
+    "unarchive": "Unarchive",
+    "showArchived": "Show archived",
+    "hideArchived": "Hide archived",
     "delete": "Supprimer",
-    "newChat": "Nouvelle discussion"
+    "newChat": "Nouvelle discussion",
+    "groups": {
+      "pinned": "Pinned",
+      "all": "Chats",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "earlier": "Earlier",
+      "archived": "Archived"
+    }
   },
   "deleteConfirm": {
     "title": "Supprimer cette discussion ?",
@@ -153,7 +318,6 @@
   "thread": {
     "loadingConversation": "Chargement de la conversation…",
     "empty": {
-      "description": "Posez des questions, poursuivez votre travail local ou démarrez un nouveau fil.",
       "greeting": "Que puis-je faire pour vous ?",
       "quickActions": {
         "plan": {
@@ -206,10 +370,14 @@
           "title": "Modifier une image",
           "prompt": "Aidez-moi à modifier une image. Demandez-moi d’abord de téléverser ou d’indiquer l’image, puis générez le résultat modifié."
         }
-      }
+      },
+      "description": "Posez des questions, poursuivez votre travail local ou démarrez un nouveau fil."
     },
     "header": {
-      "toggleSidebar": "Afficher ou masquer la barre latérale"
+      "toggleSidebar": "Afficher ou masquer la barre latérale",
+      "newChat": "Démarrer un nouveau chat",
+      "toggleTheme": "Changer le thème depuis l’en-tête",
+      "settings": "Ouvrir les paramètres"
     },
     "composer": {
       "placeholderThread": "Saisissez votre message…",
@@ -223,6 +391,7 @@
       "goalStateFallback": "Objectif",
       "goalStateExpandAria": "Afficher l’objectif complet",
       "goalStateSheetTitle": "Objectif",
+      "goalStateCloseAria": "Fermer l’objectif",
       "send": "Envoyer le message",
       "stop": "Arrêter la réponse",
       "attachImage": "Joindre une image",
@@ -241,16 +410,11 @@
           "16_9": "Large 16:9"
         }
       },
-      "encoding": "Traitement…",
-      "remove": "Retirer la pièce jointe",
-      "normalizedSizeHint": "{{orig}} → {{current}} (auto)",
-      "imageRejected": {
-        "unsupported_type": "Type de fichier non pris en charge",
-        "too_many_images": "Maximum {{max}} images par message",
-        "magic_mismatch": "Ce fichier n'est pas une image",
-        "decode_failed": "Impossible de décoder cette image",
-        "too_large": "Image trop grande — essayez-en une plus petite",
-        "io": "Impossible de lire ce fichier"
+      "tools": {
+        "search": "Rechercher",
+        "reason": "Raisonner",
+        "deepResearch": "Recherche approfondie",
+        "voice": "Entrée vocale"
       },
       "slash": {
         "ariaLabel": "Commandes slash",
@@ -301,9 +465,20 @@
           }
         }
       },
-      "goalStateCloseAria": "Fermer l’objectif"
+      "encoding": "Traitement…",
+      "remove": "Retirer la pièce jointe",
+      "normalizedSizeHint": "{{orig}} → {{current}} (auto)",
+      "imageRejected": {
+        "unsupported_type": "Type de fichier non pris en charge",
+        "too_many_images": "Maximum {{max}} images par message",
+        "magic_mismatch": "Ce fichier n'est pas une image",
+        "decode_failed": "Impossible de décoder cette image",
+        "too_large": "Image trop grande — essayez-en une plus petite",
+        "io": "Impossible de lire ce fichier"
+      }
     },
-    "scrollToBottom": "Faire défiler vers le bas"
+    "scrollToBottom": "Faire défiler vers le bas",
+    "loadEarlier": "Charger les messages précédents"
   },
   "message": {
     "streaming": "en cours de génération",
@@ -322,6 +497,8 @@
     "agentActivityLiveSummary": "En cours… · {{reasoning}} étapes · {{tools}} appels d’outils",
     "agentActivityLiveToolsOnly": "En cours… · {{tools}} appels d’outils",
     "imageAttachment": "Pièce jointe image",
+    "copyReply": "Copier la réponse",
+    "copiedReply": "Réponse copiée",
     "turnLatencyTitle": "Temps de réponse (de bout en bout)"
   },
   "lightbox": {
