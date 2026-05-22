@@ -814,7 +814,48 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
-        await self._connect_mcp()
+        # [DIAG-FIX] Move _connect_mcp into a dedicated long-lived task so the
+        # anyio cancel scopes opened inside MCP contexts (mcp.client.streamable_http
+        # uses anyio task groups internally) stay bound to that task and cannot
+        # leak cancellation to run(). Confirmed cause of bus-consumer wedge.
+        self._mcp_shutdown_event = asyncio.Event()  # [DIAG-FIX]
+        _mcp_ready = asyncio.Event()  # [DIAG-FIX]
+
+        async def _mcp_owner():  # [DIAG-FIX]
+            try:
+                await self._connect_mcp()
+            except BaseException as e:
+                logger.exception("[DIAG-FIX] MCP owner connect failed: {}", e)
+            finally:
+                _mcp_ready.set()
+            # Hold MCP contexts alive in this task's scope. Absorb spurious
+            # cancellations from anyio cancel scopes that fire when individual
+            # MCP connections error during tool bursts; only honor explicit
+            # shutdown via _mcp_shutdown_event.
+            while not self._mcp_shutdown_event.is_set():
+                try:
+                    await self._mcp_shutdown_event.wait()
+                except asyncio.CancelledError as exc:
+                    if self._mcp_shutdown_event.is_set():
+                        break
+                    current = asyncio.current_task()
+                    if current is not None:
+                        current.uncancel()
+                    logger.warning(
+                        "[DIAG-FIX] MCP owner absorbed cancel-scope leak: {}", exc
+                    )
+            # Close stacks in this task's scope where anyio bindings are valid.
+            for name, stack in list(self._mcp_stacks.items()):
+                try:
+                    await stack.aclose()
+                except (RuntimeError, BaseExceptionGroup):
+                    logger.debug(
+                        "MCP server '{}' cleanup error (can be ignored)", name
+                    )
+            self._mcp_stacks.clear()
+
+        self._mcp_owner_task = asyncio.create_task(_mcp_owner())  # [DIAG-FIX]
+        await _mcp_ready.wait()  # [DIAG-FIX] wait until MCP connect finishes
         self._start_oauth_refresh_task()
         logger.info("Agent loop started")
 
@@ -1064,6 +1105,23 @@ class AgentLoop:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
+        # [DIAG-FIX] If MCP owner task is running, let IT close the stacks in
+        # its own scope (where anyio bindings are valid). Fall back to direct
+        # close for tests/callers that never started the agent loop.
+        owner_task = getattr(self, "_mcp_owner_task", None)
+        shutdown_event = getattr(self, "_mcp_shutdown_event", None)
+        if owner_task is not None and shutdown_event is not None:
+            shutdown_event.set()
+            try:
+                await asyncio.wait_for(owner_task, timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("MCP owner task did not exit within 10s; cancelling")
+                owner_task.cancel()
+                with suppress(BaseException):
+                    await owner_task
+            except BaseException:
+                logger.exception("MCP owner task errored during shutdown")
+            return
         for name, stack in self._mcp_stacks.items():
             try:
                 await stack.aclose()
@@ -1174,6 +1232,9 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        # [DIAG-FIX] Release the MCP owner task so it can close the stacks.
+        if getattr(self, "_mcp_shutdown_event", None) is not None:
+            self._mcp_shutdown_event.set()
         logger.info("Agent loop stopping")
 
     async def _process_system_message(
