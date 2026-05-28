@@ -14,8 +14,3 @@ services:
       - "18793:18793"
     command: ["gateway"]
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"

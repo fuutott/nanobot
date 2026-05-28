@@ -12,11 +12,6 @@ x-common-config: &common-config
   security_opt:
     - apparmor=unconfined
     - seccomp=unconfined
-  logging:
-    driver: "json-file"
-    options:
-      max-size: "50m"
-      max-file: "3"
 
 services:
   nanobot-gateway:
