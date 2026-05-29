@@ -244,12 +244,7 @@ class BaseChannel(ABC):
             session_key_override=session_key,
         )
 
-        self.logger.info(  # [DIAG]
-            "[DIAG] publishing to bus: sender={} chat={} content={!r}",  # [DIAG]
-            sender_id, chat_id, (content or "")[:80],  # [DIAG]
-        )  # [DIAG]
         await self.bus.publish_inbound(msg)
-        self.logger.info("[DIAG] published to bus OK (sender={} qsize={})", sender_id, self.bus.inbound_size)  # [DIAG]
 
     @classmethod
     def default_config(cls) -> dict[str, Any]:

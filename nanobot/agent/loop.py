@@ -619,17 +619,11 @@ class AgentLoop:
         Returns the total number of cancelled tasks + subagents.
         """
         tasks = self._active_tasks.pop(key, [])
-        logger.info("[DIAG] _cancel_active_tasks START: key={} task_count={}", key, len(tasks))  # [DIAG]
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
-        logger.info("[DIAG] _cancel_active_tasks cancel() called on {} task(s)", cancelled)  # [DIAG]
-        for i, t in enumerate(tasks):  # [DIAG] indexed loop for log clarity
-            logger.info("[DIAG] _cancel_active_tasks awaiting task {}/{} done={}", i + 1, len(tasks), t.done())  # [DIAG]
+        for t in tasks:
             with suppress(asyncio.CancelledError, Exception):
                 await t
-            logger.info("[DIAG] _cancel_active_tasks awaited task {}/{}", i + 1, len(tasks))  # [DIAG]
-        logger.info("[DIAG] _cancel_active_tasks awaiting subagent cancel for {}", key)  # [DIAG]
         sub_cancelled = await self.subagents.cancel_by_session(key)
-        logger.info("[DIAG] _cancel_active_tasks END: total={}", cancelled + sub_cancelled)  # [DIAG]
         return cancelled + sub_cancelled
 
     def _effective_session_key(self, msg: InboundMessage) -> str:
@@ -797,72 +791,55 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
-        # [DIAG-FIX] Move _connect_mcp into a dedicated long-lived task so the
-        # anyio cancel scopes opened inside MCP contexts (mcp.client.streamable_http
-        # uses anyio task groups internally) stay bound to that task and cannot
-        # leak cancellation to run(). Confirmed cause of bus-consumer wedge.
-        self._mcp_shutdown_event = asyncio.Event()  # [DIAG-FIX]
-        _mcp_ready = asyncio.Event()  # [DIAG-FIX]
+        # MCP connections live in a dedicated task so anyio cancel scopes opened
+        # inside MCP contexts (mcp.client.streamable_http uses anyio task groups)
+        # stay bound to that task and cannot leak cancellation to run() when a
+        # tool burst hits a transient MCP failure.
+        self._mcp_shutdown_event = asyncio.Event()
+        _mcp_ready = asyncio.Event()
 
-        async def _mcp_owner():  # [DIAG-FIX]
+        async def _mcp_owner():
             try:
                 await self._connect_mcp()
-            except BaseException as e:
-                logger.exception("[DIAG-FIX] MCP owner connect failed: {}", e)
+            except BaseException:
+                logger.exception("MCP owner: connect failed")
             finally:
                 _mcp_ready.set()
-            # Hold MCP contexts alive in this task's scope. Absorb spurious
-            # cancellations from anyio cancel scopes that fire when individual
-            # MCP connections error during tool bursts; only honor explicit
-            # shutdown via _mcp_shutdown_event.
+            # Hold MCP contexts alive in this task's scope; absorb spurious
+            # cancellations from anyio scopes that fire when individual MCP
+            # connections error. Only honor explicit shutdown.
             while not self._mcp_shutdown_event.is_set():
                 try:
                     await self._mcp_shutdown_event.wait()
-                except asyncio.CancelledError as exc:
+                except asyncio.CancelledError:
                     if self._mcp_shutdown_event.is_set():
                         break
                     current = asyncio.current_task()
                     if current is not None:
                         current.uncancel()
-                    logger.warning(
-                        "[DIAG-FIX] MCP owner absorbed cancel-scope leak: {}", exc
-                    )
-            # Close stacks in this task's scope where anyio bindings are valid.
             for name, stack in list(self._mcp_stacks.items()):
                 try:
                     await stack.aclose()
                 except (RuntimeError, BaseExceptionGroup):
-                    logger.debug(
-                        "MCP server '{}' cleanup error (can be ignored)", name
-                    )
+                    logger.debug("MCP server '{}' cleanup error (can be ignored)", name)
             self._mcp_stacks.clear()
 
-        self._mcp_owner_task = asyncio.create_task(_mcp_owner())  # [DIAG-FIX]
-        await _mcp_ready.wait()  # [DIAG-FIX] wait until MCP connect finishes
+        self._mcp_owner_task = asyncio.create_task(_mcp_owner())
+        await _mcp_ready.wait()
         self._start_oauth_refresh_task()
         logger.info("Agent loop started")
 
-        _diag_tick = 0  # [DIAG]
-        try:  # [DIAG] catches BaseException (incl. CancelledError, BaseExceptionGroup from anyio)
-         while self._running:
-            _diag_tick += 1  # [DIAG]
-            if _diag_tick % 30 == 0:  # [DIAG] ~once per 30s when idle
-                logger.info(  # [DIAG]
-                    "[DIAG] run() alive: inbound_qsize={}, pending_sessions={}, active_tasks={}",  # [DIAG]
-                    self.bus.inbound_size,  # [DIAG]
-                    list(self._pending_queues.keys()),  # [DIAG]
-                    {k: len(v) for k, v in self._active_tasks.items() if v},  # [DIAG]
-                )  # [DIAG]
+        while self._running:
             try:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
             except asyncio.TimeoutError:
-                try:  # [DIAG] wrap so check_expired exception can't kill run()
+                try:
                     self.auto_compact.check_expired(
                         self._schedule_background,
                         active_session_keys=self._pending_queues.keys(),
                     )
-                except Exception:  # [DIAG]
-                    logger.exception("[DIAG] auto_compact.check_expired failed")  # [DIAG]
+                except Exception:
+                    logger.exception("auto_compact.check_expired failed")
                 continue
             except asyncio.CancelledError:
                 # Preserve real task cancellation so shutdown can complete cleanly.
@@ -874,18 +851,12 @@ class AgentLoop:
                 logger.warning("Error consuming inbound message: {}, continuing...", e)
                 continue
 
-            logger.info(  # [DIAG]
-                "[DIAG] bus consumed: channel={} sender={} chat={} content={!r}",  # [DIAG]
-                msg.channel, msg.sender_id, msg.chat_id, msg.content[:80],  # [DIAG]
-            )  # [DIAG]
             raw = msg.content.strip()
             if self.commands.is_priority(raw):
-                logger.info("[DIAG] priority inline dispatch START: {!r}", raw)  # [DIAG]
                 await self._dispatch_command_inline(
                     msg, msg.session_key, raw,
                     self.commands.dispatch_priority,
                 )
-                logger.info("[DIAG] priority inline dispatch END: {!r}", raw)  # [DIAG]
                 continue
             effective_key = self._effective_session_key(msg)
             # If this session already has an active pending queue (i.e. a task
@@ -895,12 +866,10 @@ class AgentLoop:
                 # Non-priority commands must not be queued for injection;
                 # dispatch them directly (same pattern as priority commands).
                 if self.commands.is_dispatchable_command(raw):
-                    logger.info("[DIAG] dispatchable inline dispatch START: {!r}", raw)  # [DIAG]
                     await self._dispatch_command_inline(
                         msg, effective_key, raw,
                         self.commands.dispatch,
                     )
-                    logger.info("[DIAG] dispatchable inline dispatch END: {!r}", raw)  # [DIAG]
                     continue
                 pending_msg = msg
                 if effective_key != msg.session_key:
@@ -931,11 +900,6 @@ class AgentLoop:
                 if t in self._active_tasks.get(k, [])
                 else None
             )
-        except BaseException as e:  # [DIAG] catches CancelledError + BaseExceptionGroup (anyio)
-            logger.exception("[DIAG] run() exiting due to {}: {}", type(e).__name__, e)  # [DIAG]
-            raise  # [DIAG]
-        finally:  # [DIAG]
-            logger.info("[DIAG] run() exited: running={} tick={}", self._running, _diag_tick)  # [DIAG]
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
@@ -1063,9 +1027,9 @@ class AgentLoop:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
-        # [DIAG-FIX] If MCP owner task is running, let IT close the stacks in
-        # its own scope (where anyio bindings are valid). Fall back to direct
-        # close for tests/callers that never started the agent loop.
+        # If MCP owner task is running, let IT close the stacks in its own scope
+        # (where anyio bindings are valid). Fall back to direct close for tests
+        # and callers that never started the agent loop.
         owner_task = getattr(self, "_mcp_owner_task", None)
         shutdown_event = getattr(self, "_mcp_shutdown_event", None)
         if owner_task is not None and shutdown_event is not None:
@@ -1190,7 +1154,7 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
-        # [DIAG-FIX] Release the MCP owner task so it can close the stacks.
+        # Release the MCP owner task so it can close the stacks.
         if getattr(self, "_mcp_shutdown_event", None) is not None:
             self._mcp_shutdown_event.set()
         logger.info("Agent loop stopping")
