@@ -87,6 +87,9 @@ class SubagentManager:
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
+        provider_factory: Callable[[str | None, str | None], tuple[LLMProvider, str]] | None = None,
+        available_providers: list[str] | None = None,
+        available_models: list[str] | None = None,
     ):
         defaults = AgentDefaults()
         self.provider = provider
@@ -109,6 +112,10 @@ class SubagentManager:
         )
         self.runner = AgentRunner(provider)
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
+        self._provider_factory = provider_factory
+        # Surfaced through MyTool so the agent can discover what it can pass to spawn.
+        self.available_providers = list(available_providers or [])
+        self.available_models = list(available_models or [])
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -157,8 +164,26 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
-        """Spawn a subagent to execute a task in the background."""
+        """Spawn a subagent to execute a task in the background.
+
+        ``provider`` / ``model`` override the inherited provider/model just for
+        this subagent. Pass either, both, or neither. Validated up-front so the
+        caller gets an immediate error rather than a silent background failure.
+        """
+        if (provider or model) and self._provider_factory is None:
+            return (
+                "Cannot spawn subagent with provider/model override: "
+                "no provider_factory configured."
+            )
+        if provider and self.available_providers and provider not in self.available_providers:
+            return (
+                f"Cannot spawn subagent: unknown provider '{provider}'. "
+                f"Available: {', '.join(self.available_providers) or '(none)'}."
+            )
+
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
@@ -181,6 +206,8 @@ class SubagentManager:
                 origin_message_id,
                 temperature,
                 workspace_scope,
+                provider,
+                model,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -210,6 +237,8 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        provider_override: str | None = None,
+        model_override: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -237,12 +266,29 @@ class SubagentManager:
                 if self._llm_wall_timeout_for_session
                 else None
             )
+
+            # Provider/model override: build an ephemeral runner so the shared
+            # one (and its provider) keep serving other subagents unchanged.
+            if (provider_override or model_override) and self._provider_factory is not None:
+                ephemeral_provider, ephemeral_model = self._provider_factory(
+                    provider_override, model_override
+                )
+                runner = AgentRunner(ephemeral_provider)
+                run_model = ephemeral_model
+                logger.info(
+                    "Subagent [{}] using override: provider={} model={}",
+                    task_id, provider_override or "(inherited)", run_model,
+                )
+            else:
+                runner = self.runner
+                run_model = self.model
+
             token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
             try:
-                result = await self.runner.run(AgentRunSpec(
+                result = await runner.run(AgentRunSpec(
                     initial_messages=messages,
                     tools=tools,
-                    model=self.model,
+                    model=run_model,
                     temperature=temperature,
                     max_iterations=self.max_iterations,
                     max_tool_result_chars=self.max_tool_result_chars,

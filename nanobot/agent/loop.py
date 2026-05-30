@@ -146,6 +146,16 @@ class AgentLoop:
     def tool_names(self) -> list[str]:
         return self.tools.tool_names
 
+    @property
+    def available_providers(self) -> list[str]:
+        """Providers the agent can pass to `spawn(provider=...)` — alias for subagents.available_providers."""
+        return list(self.subagents.available_providers)
+
+    @property
+    def available_models(self) -> list[str]:
+        """Models the agent can pass to `spawn(model=...)` — alias for subagents.available_models."""
+        return list(self.subagents.available_models)
+
     def llm_runtime(self) -> LLMRuntime:
         """Return the current provider/model pair owned by this loop."""
         self._refresh_provider_snapshot()
@@ -201,6 +211,9 @@ class AgentLoop:
         model_preset: str | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
+        subagent_provider_factory: Callable[[str | None, str | None], tuple[LLMProvider, str]] | None = None,
+        subagent_available_providers: list[str] | None = None,
+        subagent_available_models: list[str] | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -279,6 +292,9 @@ class AgentLoop:
             max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            provider_factory=subagent_provider_factory,
+            available_providers=subagent_available_providers,
+            available_models=subagent_available_models,
         )
         self._unified_session = unified_session
         self._max_messages = max_messages if max_messages > 0 else 120
@@ -344,6 +360,7 @@ class AgentLoop:
         parameters (e.g. ``cron_service``, ``session_manager``).
         """
         from nanobot.providers.factory import make_provider
+        from nanobot.config.schema import ModelPresetConfig
 
         if bus is None:
             bus = MessageBus()
@@ -359,6 +376,45 @@ class AgentLoop:
             config,
             provider_snapshot_loader,
         )
+
+        # Per-subagent provider/model override: build a factory that produces
+        # a fresh provider for the requested (provider, model) tuple while
+        # inheriting the resolved preset's other settings (tokens, temp, etc.).
+        def _subagent_provider_factory(
+            provider_name: str | None,
+            model_name: str | None,
+        ) -> tuple["LLMProvider", str]:
+            base = config.resolve_preset()
+            override_preset = ModelPresetConfig(
+                model=model_name or base.model,
+                provider=provider_name or base.provider,
+                max_tokens=base.max_tokens,
+                context_window_tokens=base.context_window_tokens,
+                temperature=base.temperature,
+                reasoning_effort=base.reasoning_effort,
+            )
+            return make_provider(config, preset=override_preset), override_preset.model
+
+        # Discoverable lists for `my check available_providers / available_models`.
+        # Only include providers the user could actually authenticate with: an
+        # api_key is set, or the spec is key-exempt (local/oauth/direct).
+        from nanobot.providers.registry import find_by_name as _find_provider_spec
+        available_providers: list[str] = []
+        for name in sorted(config.providers.model_fields.keys()):
+            entry = getattr(config.providers, name, None)
+            has_key = bool(entry and getattr(entry, "api_key", None))
+            spec = _find_provider_spec(name)
+            key_exempt = bool(spec and (spec.is_local or spec.is_oauth or spec.is_direct))
+            if has_key or key_exempt:
+                available_providers.append(name)
+        preset_names = list(config.model_presets.keys()) if config.model_presets else []
+        fallback_model_names = [
+            fb.model if hasattr(fb, "model") else (
+                config.model_presets[fb].model if isinstance(fb, str) and fb in config.model_presets else None
+            )
+            for fb in defaults.fallback_models
+        ]
+        available_models = sorted({m for m in ([resolved.model, *preset_names, *fallback_model_names]) if m})
         return cls(
             bus=bus,
             provider=provider,
@@ -385,6 +441,9 @@ class AgentLoop:
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
+            subagent_provider_factory=_subagent_provider_factory,
+            subagent_available_providers=available_providers,
+            subagent_available_models=available_models,
             **extra,
         )
 

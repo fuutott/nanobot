@@ -27,6 +27,16 @@ if TYPE_CHECKING:
             minimum=0.0,
             maximum=2.0,
         ),
+        provider=StringSchema(
+            "Optional provider name (e.g. 'openrouter', 'zhipu'). "
+            "Defaults to the main agent's provider. "
+            "Run `my check available_providers` to see what's configured."
+        ),
+        model=StringSchema(
+            "Optional model name (e.g. 'claude-opus-4-5', 'glm-5.1'). "
+            "Defaults to the main agent's model. "
+            "Run `my check available_models` to see configured presets."
+        ),
         required=["task"],
     )
 )
@@ -73,6 +83,8 @@ class SpawnTool(Tool, ContextAware):
         task: str,
         label: str | None = None,
         temperature: float | None = None,
+        provider: str | None = None,
+        model: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""
@@ -93,4 +105,6 @@ class SpawnTool(Tool, ContextAware):
             origin_message_id=self._origin_message_id.get(),
             temperature=temperature,
             workspace_scope=current_workspace_scope(),
+            provider=provider,
+            model=model,
         )

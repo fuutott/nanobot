@@ -51,3 +51,83 @@ async def test_subagent_build_tools_isolates_file_read_state(tmp_path):
     second_result = await second_read.execute(path="note.txt")
     assert second_result.startswith("1| hello")
     assert "File unchanged" not in second_result
+
+
+@pytest.mark.asyncio
+async def test_spawn_rejects_provider_override_without_factory():
+    """Asking for provider override when no factory is wired returns a clear error."""
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test"
+    sm = SubagentManager(
+        provider=provider,
+        workspace=Path("/tmp"),
+        bus=MessageBus(),
+        model="test",
+        max_tool_result_chars=16_000,
+    )
+
+    result = await sm.spawn(task="do thing", provider="openrouter")
+
+    assert "no provider_factory configured" in result
+    assert sm.get_running_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_rejects_unknown_provider():
+    """Unknown provider names short-circuit with a list of valid choices."""
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test"
+    factory_calls = []
+
+    def factory(p, m):
+        factory_calls.append((p, m))
+        return provider, m or "test"
+
+    sm = SubagentManager(
+        provider=provider,
+        workspace=Path("/tmp"),
+        bus=MessageBus(),
+        model="test",
+        max_tool_result_chars=16_000,
+        provider_factory=factory,
+        available_providers=["anthropic", "openrouter"],
+    )
+
+    result = await sm.spawn(task="do thing", provider="bogus")
+
+    assert "unknown provider 'bogus'" in result
+    assert "anthropic" in result and "openrouter" in result
+    assert factory_calls == []  # factory not invoked for rejected name
+
+
+@pytest.mark.asyncio
+async def test_spawn_with_inherited_provider_does_not_invoke_factory(monkeypatch):
+    """When no provider/model is passed, factory is bypassed entirely."""
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test"
+
+    factory_calls: list = []
+
+    def factory(p, m):
+        factory_calls.append((p, m))
+        return provider, m or "test"
+
+    sm = SubagentManager(
+        provider=provider,
+        workspace=Path("/tmp"),
+        bus=MessageBus(),
+        model="test",
+        max_tool_result_chars=16_000,
+        provider_factory=factory,
+        available_providers=["anthropic"],
+    )
+
+    # Stop _run_subagent from actually executing — we only want to verify
+    # that .spawn() doesn't reject and the factory wasn't called eagerly.
+    async def _noop(*args, **kwargs):
+        return None
+    monkeypatch.setattr(sm, "_run_subagent", _noop)
+
+    result = await sm.spawn(task="do thing")  # no provider/model
+    assert "started" in result.lower()
+    assert factory_calls == []
