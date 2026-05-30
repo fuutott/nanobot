@@ -62,10 +62,10 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 - **API Server** (`nanobot/api/server.py`): OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`).
 - **Command Router** (`nanobot/command/`): Slash command routing and built-in command handlers.
 - **Cron** (`nanobot/cron/`): Persistent scheduler for periodic agent tasks.
-- **Heartbeat** (`nanobot/heartbeat/`): Periodic agent wake-up service for scheduled task checking.
+- **Heartbeat** (`nanobot/templates/HEARTBEAT.md`): Periodic task list checked via `cron` jobs (legacy dedicated service removed in v0.2.x).
 - **Pairing** (`nanobot/pairing/`): DM sender approval store with persistent pairing codes per channel. When `allowFrom` is omitted, channels default to pairing-only mode.
 - **Skills** (`nanobot/skills/`): Markdown-based teachable behaviours with YAML frontmatter (`skills/*/SKILL.md`). Built-ins: long-goal, cron, GitHub, image-generation, memory/summarization, skill-creator, etc.
-- **Security** (`nanobot/security/`): Workspace sandboxing, SSRF guard, PTH file guard.
+- **Security** (`nanobot/security/`): Workspace sandboxing, SSRF guard (with IPv6-mapped IPv4 normalization), PTH file guard.
 - **CLI** (`nanobot/cli/`): Typer-based entry point (`commands.py`), interactive REPL via `prompt_toolkit`, setup wizard (`onboard.py`), streaming output (`stream.py`).
 
 ### Plugin Channels (`plugins/`)

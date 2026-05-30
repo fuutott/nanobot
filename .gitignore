@@ -6,6 +6,8 @@
 .env
 .web
 .orion
+nanobot-desktop/
+desktop/
 
 # Claude / AI assistant artifacts
 docs/superpowers/
@@ -104,3 +106,4 @@ plugin-migration-plan.md
 .claude/settings.local.json
 .kilo/package-lock.json
 exp/
+.playwright-mcp/

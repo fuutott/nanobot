@@ -225,6 +225,27 @@ def test_load_config_resets_ssrf_whitelist_when_next_config_is_empty(tmp_path) -
         assert not ok
 
 
+def test_load_config_defaults_local_service_access_to_enabled(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.tools.webui_allow_local_service_access is True
+
+
+def test_load_config_accepts_legacy_local_preview_access(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"tools": {"allowLocalPreviewAccess": False}}),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.tools.webui_allow_local_service_access is False
+
+
 def test_load_config_accepts_legacy_web_enabled_flag(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(

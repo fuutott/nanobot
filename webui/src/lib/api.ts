@@ -2,13 +2,19 @@ import type {
   ChatSummary,
   CliAppsPayload,
   ImageGenerationSettingsUpdate,
+  McpPresetsPayload,
+  ModelConfigurationCreate,
+  ModelConfigurationUpdate,
+  NetworkSafetySettingsUpdate,
   ProviderSettingsUpdate,
   SettingsPayload,
   SettingsUpdate,
   SidebarStatePayload,
   SlashCommand,
   WebSearchSettingsUpdate,
+  WorkspacesPayload,
   WebuiThreadPersistedPayload,
+  WorkspaceScopePayload,
 } from "./types";
 
 export class ApiError extends Error {
@@ -34,9 +40,36 @@ async function request<T>(
     credentials: "same-origin",
   });
   if (!res.ok) {
-    throw new ApiError(res.status, `HTTP ${res.status}`);
+    const text = typeof res.text === "function" ? (await res.text()).trim() : "";
+    throw new ApiError(res.status, text || `HTTP ${res.status}`);
+  }
+  const contentType = res.headers?.get?.("content-type") ?? "";
+  if (contentType && !contentType.toLowerCase().includes("application/json")) {
+    const text = typeof res.text === "function" ? await res.text() : "";
+    const isHtml = text.trimStart().toLowerCase().startsWith("<!doctype");
+    throw new ApiError(
+      res.status,
+      isHtml
+        ? "Gateway returned WebUI HTML instead of JSON. Restart nanobot gateway and try again."
+        : "Gateway returned a non-JSON response.",
+    );
   }
   return (await res.json()) as T;
+}
+
+function mcpValuesHeader(values: Record<string, unknown>): HeadersInit | undefined {
+  const payload: Record<string, unknown> = {};
+  Object.entries(values).forEach(([key, value]) => {
+    if (value === null || value === undefined) return;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) payload[key] = trimmed;
+      return;
+    }
+    payload[key] = value;
+  });
+  if (!Object.keys(payload).length) return undefined;
+  return { "X-Nanobot-MCP-Values": JSON.stringify(payload) };
 }
 
 function splitKey(key: string): { channel: string; chatId: string } {
@@ -56,6 +89,7 @@ export async function listSessions(
     title?: string;
     preview?: string;
     run_started_at?: number | null;
+    workspace_scope?: WorkspaceScopePayload | null;
   };
   const body = await request<{ sessions: Row[] }>(
     `${base}/api/sessions`,
@@ -69,6 +103,7 @@ export async function listSessions(
     title: s.title ?? "",
     preview: s.preview ?? "",
     runStartedAt: s.run_started_at ?? null,
+    workspaceScope: s.workspace_scope ?? null,
   }));
 }
 
@@ -107,6 +142,13 @@ export async function fetchSettings(
   return request<SettingsPayload>(`${base}/api/settings`, token);
 }
 
+export async function fetchWorkspaces(
+  token: string,
+  base: string = "",
+): Promise<WorkspacesPayload> {
+  return request<WorkspacesPayload>(`${base}/api/workspaces`, token);
+}
+
 export async function fetchCliApps(
   token: string,
   base: string = "",
@@ -123,6 +165,66 @@ export async function runCliAppAction(
   const query = new URLSearchParams();
   query.set("name", name);
   return request<CliAppsPayload>(`${base}/api/settings/cli-apps/${action}?${query}`, token);
+}
+
+export async function fetchMcpPresets(
+  token: string,
+  base: string = "",
+): Promise<McpPresetsPayload> {
+  return request<McpPresetsPayload>(`${base}/api/settings/mcp-presets`, token);
+}
+
+export async function runMcpPresetAction(
+  token: string,
+  action: "enable" | "remove" | "test",
+  name: string,
+  values: Record<string, string> = {},
+  base: string = "",
+): Promise<McpPresetsPayload> {
+  const query = new URLSearchParams();
+  query.set("name", name);
+  return request<McpPresetsPayload>(
+    `${base}/api/settings/mcp-presets/${action}?${query}`,
+    token,
+    { headers: mcpValuesHeader(values) },
+  );
+}
+
+export async function saveCustomMcpServer(
+  token: string,
+  values: Record<string, string>,
+  base: string = "",
+): Promise<McpPresetsPayload> {
+  return request<McpPresetsPayload>(
+    `${base}/api/settings/mcp-presets/custom`,
+    token,
+    { headers: mcpValuesHeader(values) },
+  );
+}
+
+export async function importMcpConfig(
+  token: string,
+  config: string,
+  base: string = "",
+): Promise<McpPresetsPayload> {
+  return request<McpPresetsPayload>(
+    `${base}/api/settings/mcp-presets/import`,
+    token,
+    { headers: mcpValuesHeader({ config }) },
+  );
+}
+
+export async function updateMcpServerTools(
+  token: string,
+  name: string,
+  enabledTools: string[],
+  base: string = "",
+): Promise<McpPresetsPayload> {
+  return request<McpPresetsPayload>(
+    `${base}/api/settings/mcp-presets/tools`,
+    token,
+    { headers: mcpValuesHeader({ name, enabled_tools: enabledTools }) },
+  );
 }
 
 export async function listSlashCommands(
@@ -179,6 +281,9 @@ export async function updateSettings(
   }
   if (update.model !== undefined) query.set("model", update.model);
   if (update.provider !== undefined) query.set("provider", update.provider);
+  if (update.contextWindowTokens !== undefined) {
+    query.set("context_window_tokens", String(update.contextWindowTokens));
+  }
   if (update.timezone !== undefined) query.set("timezone", update.timezone);
   if (update.botName !== undefined) query.set("bot_name", update.botName);
   if (update.botIcon !== undefined) query.set("bot_icon", update.botIcon);
@@ -186,6 +291,41 @@ export async function updateSettings(
     query.set("tool_hint_max_length", String(update.toolHintMaxLength));
   }
   return request<SettingsPayload>(`${base}/api/settings/update?${query}`, token);
+}
+
+export async function createModelConfiguration(
+  token: string,
+  configuration: ModelConfigurationCreate,
+  base: string = "",
+): Promise<SettingsPayload> {
+  const query = new URLSearchParams();
+  if (configuration.name !== undefined) query.set("name", configuration.name);
+  query.set("label", configuration.label);
+  query.set("provider", configuration.provider);
+  query.set("model", configuration.model);
+  return request<SettingsPayload>(
+    `${base}/api/settings/model-configurations/create?${query}`,
+    token,
+  );
+}
+
+export async function updateModelConfiguration(
+  token: string,
+  configuration: ModelConfigurationUpdate,
+  base: string = "",
+): Promise<SettingsPayload> {
+  const query = new URLSearchParams();
+  query.set("name", configuration.name);
+  if (configuration.label !== undefined) query.set("label", configuration.label);
+  if (configuration.provider !== undefined) query.set("provider", configuration.provider);
+  if (configuration.model !== undefined) query.set("model", configuration.model);
+  if (configuration.contextWindowTokens !== undefined) {
+    query.set("context_window_tokens", String(configuration.contextWindowTokens));
+  }
+  return request<SettingsPayload>(
+    `${base}/api/settings/model-configurations/update?${query}`,
+    token,
+  );
 }
 
 export async function updateProviderSettings(
@@ -197,8 +337,35 @@ export async function updateProviderSettings(
   query.set("provider", update.provider);
   if (update.apiKey !== undefined) query.set("api_key", update.apiKey);
   if (update.apiBase !== undefined) query.set("api_base", update.apiBase);
+  if (update.apiType !== undefined) query.set("api_type", update.apiType);
   return request<SettingsPayload>(
     `${base}/api/settings/provider/update?${query}`,
+    token,
+  );
+}
+
+export async function loginProviderOAuth(
+  token: string,
+  provider: string,
+  base: string = "",
+): Promise<SettingsPayload> {
+  const query = new URLSearchParams();
+  query.set("provider", provider);
+  return request<SettingsPayload>(
+    `${base}/api/settings/provider/oauth-login?${query}`,
+    token,
+  );
+}
+
+export async function logoutProviderOAuth(
+  token: string,
+  provider: string,
+  base: string = "",
+): Promise<SettingsPayload> {
+  const query = new URLSearchParams();
+  query.set("provider", provider);
+  return request<SettingsPayload>(
+    `${base}/api/settings/provider/oauth-logout?${query}`,
     token,
   );
 }
@@ -219,6 +386,20 @@ export async function updateWebSearchSettings(
   }
   return request<SettingsPayload>(
     `${base}/api/settings/web-search/update?${query}`,
+    token,
+  );
+}
+
+export async function updateNetworkSafetySettings(
+  token: string,
+  update: NetworkSafetySettingsUpdate,
+  base: string = "",
+): Promise<SettingsPayload> {
+  const query = new URLSearchParams();
+  query.set("webui_allow_local_service_access", String(update.webuiAllowLocalServiceAccess));
+  query.set("webui_default_access_mode", update.webuiDefaultAccessMode);
+  return request<SettingsPayload>(
+    `${base}/api/settings/network-safety/update?${query}`,
     token,
   );
 }

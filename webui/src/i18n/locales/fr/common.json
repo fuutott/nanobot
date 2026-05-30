@@ -25,7 +25,9 @@
       "section": "Système",
       "restartHint": "Redémarrez nanobot pour appliquer les changements d’exécution.",
       "restart": "Redémarrer nanobot",
-      "restarting": "Redémarrage..."
+      "restarting": "Redémarrage...",
+      "restartEngine": "Redémarrer le moteur",
+      "restartingEngine": "Redémarrage du moteur..."
     },
     "restart": {
       "completed": "Redémarrage terminé en {{seconds}} s."
@@ -40,30 +42,19 @@
   },
   "sidebar": {
     "navigation": "Navigation de la barre latérale",
-    "globalActions": "Actions globales",
     "collapse": "Réduire la barre latérale",
-    "toggleTheme": "Changer de thème",
-    "home": "Accueil",
     "newChat": "Nouvelle discussion",
     "searchAria": "Rechercher",
-    "viewOptions": "View",
-    "compactList": "Compact list",
-    "showPreviews": "Show previews",
-    "showTimestamps": "Show time",
-    "sortLabel": "Sort",
-    "sortUpdated": "Recently updated",
-    "sortCreated": "Recently created",
-    "sortTitle": "Title A-Z",
     "searchPlaceholder": "Rechercher",
     "searchResults": "Résultats",
     "noSearchResults": "Aucun chat correspondant.",
     "recent": "Récentes",
-    "refreshSessions": "Actualiser les sessions",
     "settings": "Paramètres",
     "language": {
       "label": "Langue",
       "ariaLabel": "Changer de langue"
-    }
+    },
+    "apps": "Apps"
   },
   "settings": {
     "backToChat": "Retour à la discussion",
@@ -79,9 +70,12 @@
       "models": "Models",
       "providers": "Providers",
       "image": "Image",
-      "web": "Web",
-      "runtime": "Runtime",
-      "advanced": "Advanced"
+      "browser": "Web",
+      "runtime": "Système",
+      "advanced": "Security",
+      "cliApps": "Apps CLI",
+      "mcp": "MCP",
+      "apps": "Apps"
     },
     "sections": {
       "interface": "Interface",
@@ -95,9 +89,13 @@
       "webSearch": "Web search",
       "webBehavior": "Behavior",
       "identity": "Identity",
-      "safety": "Safety",
+      "webuiSafety": "Web safety",
       "capabilities": "Capacités",
-      "integrations": "Integrations"
+      "cliApps": "Apps CLI",
+      "mcp": "Services MCP",
+      "apps": "Apps",
+      "nativeHost": "App",
+      "hostSafety": "App safety"
     },
     "rows": {
       "theme": "Thème",
@@ -130,18 +128,17 @@
       "botName": "Bot name",
       "botIcon": "Bot icon",
       "timezone": "Timezone",
-      "toolHintMaxLength": "Tool hint length",
-      "workspacePath": "Workspace path",
-      "heartbeat": "Heartbeat",
-      "dream": "Dream",
-      "unifiedSession": "Unified session",
-      "restrictWorkspace": "Restrict to workspace",
-      "execTool": "Exec tool",
-      "execSandbox": "Exec sandbox",
-      "ssrfWhitelist": "SSRF whitelist",
-      "mcpServers": "MCP servers",
-      "pathAppend": "PATH append",
-      "configurationDocs": "Configuration docs"
+      "workspacePath": "Espace de travail par défaut",
+      "localServiceAccess": "Local services",
+      "webuiDefaultAccess": "Default access",
+      "currentModel": "Modèle actuel",
+      "brandLogos": "Logos de marque",
+      "cliAppsCatalog": "Catalogue d'apps CLI",
+      "cliAppsFilter": "Filtre des apps CLI",
+      "engine": "Moteur",
+      "logs": "Journaux",
+      "diagnostics": "Diagnostics",
+      "contextWindow": "Context window"
     },
     "help": {
       "theme": "Basculer entre les apparences claire et sombre.",
@@ -164,11 +161,23 @@
       "defaultAspectRatio": "Utilisé lorsque le prompt ne choisit pas de format.",
       "defaultImageSize": "Indication de taille envoyée aux fournisseurs qui la prennent en charge.",
       "maxImagesPerTurn": "Limite supérieure pour une requête generate_image.",
-      "botName": "Shown in runtime surfaces that use the configured bot identity.",
-      "botIcon": "Short emoji or text shown beside the bot name.",
-      "timezone": "IANA timezone used by runtime context and schedules.",
-      "toolHintMaxLength": "Maximum characters shown in tool progress hints.",
-      "advancedReadOnly": "Advanced safety controls are read-only in WebUI. Edit config.json intentionally when needed."
+      "botName": "Affiché partout où nanobot utilise un nom visible.",
+      "botIcon": "Emoji ou texte court affiché avec le nom du bot.",
+      "timezone": "Utilisé pour les planifications et les réponses sensibles à l’heure.",
+      "localServiceAccess": "Allow Full Access shell commands to reach localhost services.",
+      "webuiDefaultAccess": "Used by web chats without a project-specific permission.",
+      "securityManagedControls": "Web fetches always protect local, private, and metadata services. Core channel safety stays in config.json.",
+      "currentModel": "Choisissez le modèle que nanobot utilisera pour les prochaines réponses.",
+      "selectedModelProvider": "Défini par le modèle sélectionné.",
+      "selectedModelValue": "Défini par le modèle sélectionné.",
+      "brandLogos": "Les logos sont chargés depuis les domaines des marques avec une icône locale en secours.",
+      "cliAppsCatalog": "Parcourez les CLIs d'apps que nanobot peut exécuter localement.",
+      "cliAppsFilter": "Recherchez par app, catégorie ou capacité.",
+      "logs": "Ouvrir le dossier des journaux du moteur natif.",
+      "diagnostics": "Exporter un petit rapport runtime pour le support.",
+      "localServiceAccessNative": "Allow Full Access shell commands to reach services on this Mac.",
+      "webuiDefaultAccessNative": "Used by native chats without a project-specific permission.",
+      "contextWindow": "Choose the default context budget for this model configuration."
     },
     "values": {
       "light": "Clair",
@@ -184,10 +193,12 @@
       "expanded": "Expanded",
       "on": "On",
       "off": "Off",
+      "defaultPermission": "Default Permission",
+      "fullAccess": "Full Access",
       "configured": "Configured",
       "notConfigured": "Not configured",
-      "restartRequired": "Restart required",
-      "liveReload": "Live reload ready"
+      "pending": "En attente",
+      "restartingEngine": "Redémarrage"
     },
     "status": {
       "loading": "Chargement des paramètres...",
@@ -197,14 +208,24 @@
       "savedRestart": "Enregistré. Redémarrez nanobot pour appliquer.",
       "restartAfterSaving": "Enregistrez les modifications, puis redémarrez lorsque vous êtes prêt.",
       "savedRestartApply": "Enregistré. Redémarrez lorsque vous êtes prêt.",
-      "imageProviderRestart": "Modifications du fournisseur d’images enregistrées. Redémarrez lorsque vous êtes prêt."
+      "imageProviderRestart": "Modifications du fournisseur d’images enregistrées. Redémarrez lorsque vous êtes prêt.",
+      "hostRestartAfterSaving": "Enregistrez les changements et nanobot redémarrera son moteur.",
+      "hostRestartPending": "Enregistré. Redémarrage du moteur quand il sera prêt.",
+      "hostApiUnavailable": "Host actions are only available inside the native app.",
+      "logsOpened": "Opened logs folder.",
+      "logsOpenFailed": "Could not open logs folder.",
+      "diagnosticsExported": "Diagnostics exported to {{path}}.",
+      "diagnosticsExportFailed": "Could not export diagnostics."
     },
     "actions": {
       "save": "Enregistrer",
       "saving": "Enregistrement",
       "edit": "Modifier",
       "cancel": "Annuler",
-      "openDocs": "Open docs"
+      "open": "Ouvrir",
+      "export": "Exporter",
+      "opening": "Opening...",
+      "exporting": "Exporting..."
     },
     "byok": {
       "description": "Utilisez vos propres clés de fournisseur. Nanobot lit ces valeurs depuis la configuration actuelle, et seuls les fournisseurs configurés peuvent être sélectionnés dans Général.",
@@ -259,7 +280,8 @@
     },
     "providers": {
       "searchPlaceholder": "Search providers",
-      "noMatches": "No providers match this search."
+      "noMatches": "No providers match this search.",
+      "saveProvider": "Enregistrer le fournisseur"
     },
     "image": {
       "selectProvider": "Sélectionner un fournisseur",
@@ -267,6 +289,134 @@
       "selectSize": "Sélectionner une taille",
       "configureProvider": "Configurer le fournisseur",
       "missingCredential": "Configurez ce fournisseur avant d’activer la génération d’images."
+    },
+    "models": {
+      "selectModel": "Sélectionner un modèle",
+      "addConfiguration": "Ajouter une configuration",
+      "newConfiguration": "Nouvelle configuration de modèle",
+      "newConfigurationHelp": "Enregistrez un fournisseur et un modèle comme option en un clic.",
+      "configurationName": "Nom",
+      "configurationNameHelp": "Renommez cette configuration de modèle enregistrée.",
+      "configurationNamePlaceholder": "Rédaction rapide"
+    },
+    "timezone": {
+      "select": "Sélectionner un fuseau horaire",
+      "search": "Rechercher un fuseau horaire",
+      "empty": "Aucun fuseau horaire correspondant."
+    },
+    "cliApps": {
+      "allCategories": "Toutes les catégories",
+      "availableCount": "{{count}} apps",
+      "installedCount": "{{count}} installées",
+      "summary": "{{installed}} CLIs installées sur {{total}}",
+      "filterAll": "Tout",
+      "filterInstalled": "CLIs installées",
+      "filterNotInstalled": "Non installées",
+      "searchPlaceholder": "Rechercher des CLIs",
+      "statusInstalled": "Installée",
+      "statusAvailable": "Disponible",
+      "statusMissing": "Dépendance manquante",
+      "statusUnsupported": "Non compatible",
+      "statusNotInstalled": "Non installée",
+      "unsupported": "Non compatible",
+      "loading": "Chargement des apps CLI...",
+      "empty": "Aucune app CLI ne correspond à ce filtre.",
+      "readyTitle": "@{{name}} est prêt",
+      "readyStatus": "Prêt",
+      "readyPrompt": "Utilisez @{{name}} pour voir ce que ce CLI peut faire.",
+      "readyTry": "Essayer @{{name}}",
+      "readyCopied": "Copié",
+      "openChat": "Ouvrir le chat",
+      "requires": "Requiert",
+      "test": "Tester le CLI",
+      "update": "Mettre à jour le CLI",
+      "uninstall": "Désinstaller le CLI",
+      "install": "Installer le CLI",
+      "unavailable": "Indisponible",
+      "noDescription": "Aucune description disponible."
+    },
+    "mcp": {
+      "allCategories": "Toutes les catégories",
+      "summary": "{{installed}} presets activés sur {{total}}",
+      "filterAll": "Tout",
+      "filterInstalled": "Activés",
+      "filterNotInstalled": "Non activés",
+      "searchPlaceholder": "Rechercher des presets MCP",
+      "moreOptions": "Plus d'options MCP",
+      "moreOptionsSubtitle": "Ajoutez un serveur personnalisé ou importez mcp.json.",
+      "customTitle": "MCP personnalisé",
+      "customSubtitle": "Ajoutez n'importe quel serveur MCP stdio, HTTP ou SSE.",
+      "customAction": "Personnalisé",
+      "importAction": "Importer",
+      "serverName": "Nom du serveur",
+      "serverUrl": "URL",
+      "transport": "Transport",
+      "command": "Commande",
+      "args": "Args JSON",
+      "headers": "Headers JSON",
+      "env": "Env JSON",
+      "timeout": "Délai d'outil",
+      "advancedOptions": "Options avancées",
+      "hideAdvanced": "Masquer les options avancées",
+      "saveCustom": "Enregistrer MCP",
+      "configImport": "Importer mcp.json",
+      "importConfig": "Importer",
+      "restartRequired": "Redémarrez nanobot pour connecter les outils MCP mis à jour.",
+      "toolsFound": "{{count}} outils",
+      "loading": "Chargement des presets MCP...",
+      "empty": "Aucun preset MCP ne correspond à ce filtre.",
+      "openDocs": "Ouvrir la doc",
+      "test": "Tester",
+      "remove": "Supprimer",
+      "enable": "Activer",
+      "enabled": "Activé",
+      "setup": "Connecter",
+      "configure": "Connecter",
+      "connectTitle": "Connecter {{name}}",
+      "connectHint": "Ajoutez la clé depuis les paramètres de votre compte.",
+      "saveAndEnable": "Enregistrer et activer",
+      "updateSetup": "Mettre à jour la configuration",
+      "configured": "configuré",
+      "keepExisting": "Laissez vide pour conserver la valeur actuelle",
+      "statusConfigured": "Configuré",
+      "statusMissingCredentials": "Clé requise",
+      "statusMissingDependency": "Dépendance requise",
+      "statusComingSoon": "Bientôt disponible",
+      "statusNotInstalled": "Non activé",
+      "toolScope": "Outils",
+      "allTools": "Tous",
+      "noTools": "Aucun",
+      "testForTools": "Exécutez Tester pour inspecter et choisir des outils individuels."
+    },
+    "legal": {
+      "thirdPartyBrands": "Les noms, logos et marques de produits appartiennent à leurs propriétaires respectifs. Leur utilisation sert uniquement à l'identification et n'implique aucune approbation."
+    },
+    "apps": {
+      "description": "Ajoutez des CLI d’apps et des services MCP que nanobot peut utiliser dans le chat.",
+      "cliLabel": "CLI",
+      "mcpLabel": "MCP",
+      "filterAll": "Tout",
+      "filterCli": "Apps CLI",
+      "filterMcp": "Services MCP",
+      "enabledSummary": "{{count}} activés",
+      "caption": "{{cli}} CLI · {{mcp}} MCP",
+      "searchPlaceholder": "Rechercher des apps",
+      "featured": "En vedette",
+      "loading": "Chargement des apps...",
+      "empty": "Aucune app ne correspond à ce filtre."
+    },
+    "oauth": {
+      "authentication": "OAuth authentication",
+      "signIn": "Sign in",
+      "signingIn": "Signing in...",
+      "signInAgain": "Sign in again",
+      "signOut": "Sign out",
+      "signedInAs": "Signed in as {{account}}",
+      "signInHelp": "Sign in from this device; no API key is stored in config.",
+      "signInRequired": "Sign in required",
+      "signInBeforeSaving": "Sign in before saving this OAuth provider as the active model provider.",
+      "signedIn": "Signed in",
+      "notSignedIn": "Not signed in"
     }
   },
   "chat": {
@@ -274,7 +424,10 @@
     "loading": "Chargement…",
     "noSessions": "Aucune session pour le moment.",
     "showMore": "Afficher {{count}} de plus",
+    "collapsed": "{{count}} discussions masquées",
+    "showLess": "Afficher moins",
     "actions": "Actions de la discussion {{title}}",
+    "newInProject": "Démarrer une nouvelle discussion dans {{project}}",
     "activity": {
       "running": "Agent running",
       "complete": "Agent finished"
@@ -285,6 +438,9 @@
     "renameTitle": "Rename chat",
     "renameDescription": "Choose a local sidebar name for this chat.",
     "renamePlaceholder": "Chat name",
+    "renameProjectTitle": "Rename project",
+    "renameProjectDescription": "Choose a local sidebar name for this project.",
+    "renameProjectPlaceholder": "Project name",
     "renameSave": "Save",
     "archive": "Archive",
     "unarchive": "Unarchive",
@@ -295,6 +451,7 @@
     "groups": {
       "pinned": "Pinned",
       "all": "Chats",
+      "projects": "Projects",
       "today": "Today",
       "yesterday": "Yesterday",
       "earlier": "Earlier",
@@ -318,7 +475,12 @@
   "thread": {
     "loadingConversation": "Chargement de la conversation…",
     "empty": {
-      "greeting": "Que puis-je faire pour vous ?",
+      "greetings": {
+        "workOn": "Sur quoi travaillons-nous ensemble ?",
+        "start": "Par où commence-t-on ?",
+        "build": "Que construisons-nous aujourd'hui ?",
+        "tackle": "Que résout-on ensemble ?"
+      },
       "quickActions": {
         "plan": {
           "title": "Créer un plan de projet",
@@ -370,8 +532,7 @@
           "title": "Modifier une image",
           "prompt": "Aidez-moi à modifier une image. Demandez-moi d’abord de téléverser ou d’indiquer l’image, puis générez le résultat modifié."
         }
-      },
-      "description": "Posez des questions, poursuivez votre travail local ou démarrez un nouveau fil."
+      }
     },
     "header": {
       "toggleSidebar": "Afficher ou masquer la barre latérale",
@@ -439,6 +600,10 @@
             "title": "Afficher l’état",
             "description": "Afficher l’état du runtime, du provider et des channels."
           },
+          "model": {
+            "title": "Modèle",
+            "description": "Afficher ou changer le préréglage de modèle actif."
+          },
           "history": {
             "title": "Afficher l’historique",
             "description": "Afficher les N derniers messages persistés de la conversation."
@@ -462,7 +627,21 @@
           "help": {
             "title": "Afficher l’aide",
             "description": "Lister les commandes slash disponibles."
+          },
+          "pairing": {
+            "title": "Appairage",
+            "description": "Gérer les demandes d’appairage."
           }
+        },
+        "badges": {
+          "current": "Actuel",
+          "recent": "Récent"
+        },
+        "details": {
+          "goalActive": "L’objectif est en cours",
+          "goalReady": "Démarrer un objectif durable",
+          "history": "Afficher les messages récents",
+          "stopRunning": "En cours"
         }
       },
       "encoding": "Traitement…",
@@ -475,6 +654,23 @@
         "decode_failed": "Impossible de décoder cette image",
         "too_large": "Image trop grande — essayez-en une plus petite",
         "io": "Impossible de lire ce fichier"
+      },
+      "mentions": {
+        "ariaLabel": "Apps",
+        "label": "Apps",
+        "cliGroup": "Apps CLI",
+        "mcpGroup": "Services MCP",
+        "cliBadge": "CLI",
+        "mcpBadge": "MCP",
+        "cliDescription": "Utiliser @{{name}} comme app CLI locale",
+        "mcpDescription": "Utiliser @{{name}} comme serveur MCP"
+      },
+      "workspace": {
+        "accessAria": "Workspace access mode",
+        "projectAria": "Choisir un projet",
+        "projectPlaceholder": "Sélectionner un projet",
+        "default": "Default Permission",
+        "full": "Full Access"
       }
     },
     "scrollToBottom": "Faire défiler vers le bas",
@@ -499,7 +695,19 @@
     "imageAttachment": "Pièce jointe image",
     "copyReply": "Copier la réponse",
     "copiedReply": "Réponse copiée",
-    "turnLatencyTitle": "Temps de réponse (de bout en bout)"
+    "turnLatencyTitle": "Temps de réponse (de bout en bout)",
+    "activityThinkingFor": "Réflexion pendant {{duration}}",
+    "activityThought": "Réflexion terminée",
+    "activityThoughtFor": "Réflexion terminée en {{duration}}",
+    "cliActivityRunningOne": "Utilisation de @{{name}}",
+    "cliActivityRanOne": "@{{name}} utilisé",
+    "cliActivityFailedOne": "Échec de @{{name}}",
+    "cliActivityRunningMany": "Utilisation de {{count}} apps CLI",
+    "cliActivityRanMany": "{{count}} apps CLI utilisées",
+    "cliActivityFailedMany": "Échec de {{count}} apps CLI",
+    "cliRunRunning": "Utilisation",
+    "cliRunRan": "Utilisé",
+    "cliRunFailed": "Échec"
   },
   "lightbox": {
     "title": "Aperçu de l’image",
@@ -521,6 +729,19 @@
     "messageTooBig": {
       "title": "Message trop volumineux",
       "body": "Le serveur a rejeté votre dernier message car il dépasse la taille autorisée. Retirez des images ou choisissez des fichiers plus légers, puis renvoyez-le."
+    },
+    "workspaceScopeRejected": {
+      "title": "Workspace was not changed",
+      "body": "Nanobot kept the previous workspace because the requested project or access mode was rejected by the gateway."
+    }
+  },
+  "workspace": {
+    "dialog": {
+      "defaultProject": "Default workspace",
+      "manual": "Coller un chemin",
+      "manualPlaceholder": "/Users/name/project",
+      "usePath": "Use Path",
+      "absolutePathRequired": "Enter an absolute folder path on this machine."
     }
   }
 }

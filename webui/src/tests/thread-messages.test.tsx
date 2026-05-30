@@ -226,6 +226,7 @@ describe("ThreadMessages", () => {
         content: "final answer",
         reasoning: "summarize results",
         reasoningStreaming: false,
+        latencyMs: 9_200,
         createdAt: 3,
       },
     ];
@@ -239,6 +240,7 @@ describe("ThreadMessages", () => {
       "t1",
       "a1-reasoning",
     ]);
+    expect(units[0].type === "cluster" ? units[0].messages.at(-1)?.latencyMs : undefined).toBe(9_200);
     expect(units[1]).toMatchObject({
       type: "single",
       message: {
@@ -252,7 +254,187 @@ describe("ThreadMessages", () => {
 
     render(<ThreadMessages messages={messages} isStreaming={false} />);
     expect(screen.queryByRole("button", { name: /^thinking$/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Thought for 9s")).toBeInTheDocument();
     expect(screen.getByText("final answer")).toBeInTheDocument();
+  });
+
+  it("keeps late activity above the live assistant answer while streaming", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "t0",
+        role: "tool",
+        kind: "trace",
+        content: "Thinking",
+        traces: ["Thinking"],
+        activitySegmentId: "seg-live",
+        createdAt: 1,
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "partial answer",
+        isStreaming: true,
+        createdAt: 2,
+      },
+      {
+        id: "t1",
+        role: "tool",
+        kind: "trace",
+        content: "Reading api.github.com/repos/NousResearch/hermes-agent",
+        traces: ["Reading api.github.com/repos/NousResearch/hermes-agent"],
+        activitySegmentId: "seg-live",
+        createdAt: 3,
+      },
+    ];
+
+    const units = buildDisplayUnits(messages);
+
+    expect(units).toHaveLength(2);
+    expect(units[0].type === "cluster" ? units[0].messages.map((m) => m.id) : []).toEqual([
+      "t0",
+      "t1",
+    ]);
+    expect(units[1]).toMatchObject({
+      type: "single",
+      message: {
+        id: "a1",
+        content: "partial answer",
+      },
+    });
+
+    render(<ThreadMessages messages={messages} isStreaming />);
+
+    const activity = screen.getByRole("button", { name: /working/i });
+    const answer = screen.getByText("partial answer");
+    expect(activity.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps late activity above a completed assistant answer", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "r1",
+        role: "assistant",
+        content: "",
+        reasoning: "checking weather",
+        activitySegmentId: "seg-late",
+        createdAt: 1,
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Hong Kong is hot today.",
+        latencyMs: 161_000,
+        createdAt: 2,
+      },
+      {
+        id: "t1",
+        role: "tool",
+        kind: "trace",
+        content: "Reading hko.gov.hk/en/wxinfo/currwx/current.htm",
+        traces: ["Reading hko.gov.hk/en/wxinfo/currwx/current.htm"],
+        activitySegmentId: "seg-late",
+        createdAt: 3,
+      },
+    ];
+
+    const units = buildDisplayUnits(messages);
+
+    expect(units).toHaveLength(2);
+    expect(units[0].type === "cluster" ? units[0].messages.map((m) => m.id) : []).toEqual([
+      "r1",
+      "t1",
+    ]);
+    expect(units[1]).toMatchObject({
+      type: "single",
+      message: {
+        id: "a1",
+        content: "Hong Kong is hot today.",
+      },
+    });
+
+    render(<ThreadMessages messages={messages} isStreaming={false} />);
+
+    const activity = screen.getByText("Thought for 2m 41s");
+    const answer = screen.getByText("Hong Kong is hot today.");
+    expect(activity.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByText(/thought/i)).toHaveLength(1);
+  });
+
+  it("renders interrupted pre-tool text as activity before the final answer", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "prelude",
+        role: "assistant",
+        content: "",
+        reasoning: "I will inspect first.",
+        isStreaming: false,
+        activitySegmentId: "seg-1",
+        createdAt: 1,
+      },
+      {
+        id: "tool",
+        role: "tool",
+        kind: "trace",
+        content: 'exec({"cmd":"ls"})',
+        traces: ['exec({"cmd":"ls"})'],
+        activitySegmentId: "seg-1",
+        createdAt: 2,
+      },
+      {
+        id: "final",
+        role: "assistant",
+        content: "Done. Open index.html to play.",
+        createdAt: 3,
+      },
+    ];
+
+    const units = buildDisplayUnits(messages);
+
+    expect(units).toHaveLength(2);
+    expect(units[0].type === "cluster" ? units[0].messages.map((m) => m.id) : []).toEqual([
+      "prelude",
+      "tool",
+    ]);
+    expect(units[1]).toMatchObject({
+      type: "single",
+      message: {
+        id: "final",
+        content: "Done. Open index.html to play.",
+      },
+    });
+  });
+
+  it("passes assistant turn latency to the preceding completed activity cluster", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "r1",
+        role: "assistant",
+        content: "",
+        reasoning: "search plan",
+        reasoningStreaming: false,
+        createdAt: 1,
+      },
+      {
+        id: "t1",
+        role: "tool",
+        kind: "trace",
+        content: "web_search()",
+        traces: ["web_search()"],
+        createdAt: 1,
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "final answer",
+        latencyMs: 14_800,
+        createdAt: 1,
+      },
+    ];
+
+    render(<ThreadMessages messages={messages} isStreaming={false} />);
+
+    expect(screen.getByText("Thought for 15s")).toBeInTheDocument();
+    expect(screen.queryByText("Thought for 0s")).not.toBeInTheDocument();
   });
 
   it("shows copy only on the last assistant slice before the next user turn", () => {
