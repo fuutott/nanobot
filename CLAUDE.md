@@ -142,7 +142,7 @@ When the user posts a message matching the pattern:
 4. For every file changed both locally and upstream: `git diff main...upstream/main -- <file>` — read both sides before deciding
 5. Stash any unstaged changes: `git stash push -m "pre-merge unstaged" -- <files>`
 6. `git merge upstream/main --no-ff --no-commit` — start the merge without committing
-7. Resolve conflicts: **prefer local by default**; accept upstream only when it is clearly better or makes local redundant. For Discord bot filtering, always keep the @ mention requirement.
+7. Resolve conflicts using the **upstream-spine** principle: adopt upstream's shape and re-apply our features to fit *their* structure. Don't preserve parallel/legacy implementations. See [AGENTS.md](AGENTS.md) § "Conflict-resolution principle" for the full rule.
 8. `git add` resolved files, then `git commit` with a message summarising what upstream brought in and what local customisations were preserved.
 9. `git stash pop` — restore stashed changes
 10. `git push origin main` — plain push, no force flag

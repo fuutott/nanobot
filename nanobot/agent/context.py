@@ -136,7 +136,7 @@ class ContextBuilder:
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         if sender_id:
-            lines.append(f"Sender ID: {sender_id}")
+            lines += [f"Sender ID: {sender_id}"]
         if supplemental_lines:
             lines.extend(supplemental_lines)
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines) + "\n" + ContextBuilder._RUNTIME_CONTEXT_END
