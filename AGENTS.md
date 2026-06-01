@@ -118,20 +118,6 @@ Agent can pass `provider=` and `model=` when calling `spawn`. Defaults inherit f
 - Resource limits in `docker-compose.yml`: 1 CPU / 1 GB memory per service
 - Rebuild via `./redo.ps1` — wraps `docker compose build && docker compose up -d`
 
-### WhatsApp Bridge (`bridge/`)
-
-Node.js service using Baileys/Whiskey Sockets. Bundled into the wheel via `pyproject.toml` `force-include`. Build skipped in Docker when `BUILD_BRIDGE=0`.
-
-## Fork-curated documentation pointers
-
-Reference docs maintained in this fork (in addition to upstream's `docs/`):
-
-- [docs/MEMORY.md](docs/MEMORY.md) — Memory architecture: `Consolidator` (summarises old turns → `memory/history.jsonl`) and `Dream` (cron job that merges history into `SOUL.md`, `USER.md`, `memory/MEMORY.md`). Covers `/dream` commands, `GitStore` versioning, and `agents.defaults.dream` config fields (`intervalH`, `modelOverride`, `maxBatchSize`, `maxIterations`).
-- [docs/PYTHON_SDK.md](docs/PYTHON_SDK.md) — Programmatic API (`Nanobot.from_config()`, `bot.run()`, `RunResult`). Covers `AgentHook` lifecycle callbacks and `finalize_content` pipeline.
-- [docs/WEBSOCKET.md](docs/WEBSOCKET.md) — WebSocket server channel: wire protocol (`ready`/`message`/`delta`/`stream_end` events), token issuance, TLS, and `allowFrom` access control.
-- [docs/CHANNEL_PLUGIN_GUIDE.md](docs/CHANNEL_PLUGIN_GUIDE.md) — How to build and package a custom channel plugin: subclass `BaseChannel`, register under the `nanobot.channels` entry point group, use a Pydantic config model (required — plain `dict` breaks `is_allowed()`), and optionally implement `send_delta()` for streaming.
-- Upstream also ships [docs/configuration.md](docs/configuration.md), [docs/chat-commands.md](docs/chat-commands.md), [docs/channel-plugin-guide.md](docs/channel-plugin-guide.md).
-
 ## Sync workflow
 
 This is the primary edit machine. Work committed here is pushed to `origin` (`fuutott/nanobot`) and pulled on other machines. Other machines do a plain `git pull` — no force, no reset.
