@@ -28,6 +28,8 @@ COPY bridge/ bridge/
 COPY webui/ webui/
 COPY plugins/ plugins/
 # Skip the upstream hatch webui build — plugin nanobot-channel-webui ships its own dist.
+# (Upstream now defaults to skipping unless NANOBOT_FORCE_WEBUI_BUILD=1; we stay
+# explicit with SKIP=1 since the plugin install covers the UI.)
 RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache '.[discord]' && \
         uv pip install --system --no-cache \
             /app/plugins/nanobot-channel-webui \
