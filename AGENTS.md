@@ -220,7 +220,6 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 
 | Area | What we keep | Why |
 |------|-------------|-----|
-| `config/schema.py` | `dream.interval_h` default = 8h (kept upstream's `dream.enabled` toggle) | Personal-agent tempo; less frequent than upstream's 2h |
 | `config/loader.py` | Open config with `encoding="utf-8-sig"` | Tolerate UTF-8 BOM (Windows Notepad adds it) |
 | `cli/onboard.py` | `importlib.import_module(channel_cls.__module__)` instead of hardcoded `nanobot.channels.{name}` | Required to resolve channel configs for **plugin** channels (live in `nanobot_channel_*` packages) |
 | `pyproject.toml` | `fastapi`, `uvicorn`, `python-multipart` deps | Plugin channels (`nanobot-channel-{webui,openaiapi,mcpserver}`) require them |
@@ -230,6 +229,7 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 ### Absorbed upstream (no longer local)
 
 - **Discord `group_policy="mention"` default** — used to be our fork's hard requirement; became the upstream default in v0.2.x. Nothing to preserve.
+- **`dream.interval_h=8` default** — dropped after upstream's Dream refactor (`d1a94dae` replaced two-phase Dream with simple cron + `process_direct`). Runtime config also reverted to upstream's 2h default; `maxBatchSize` and `maxIterations` are now deprecated fields.
 
 ## Local testing
 
