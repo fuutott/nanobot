@@ -21,14 +21,13 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import MCPServerConfig
 
 
-def _fake_conn(session: object) -> SimpleNamespace:
-    """Wrap a mock session in a connection-shaped shim for wrapper tests.
-    Reconnect-specific behaviour is exercised in `test_mcp_reconnect.py`."""
-    return SimpleNamespace(
-        session=session,
-        epoch=0,
-        reconnect_if_stale=AsyncMock(),
-    )
+def _fake_conn(session: object) -> object:
+    """Identity shim left in place to minimize diff against pre-upstream-spine tests.
+
+    Wrappers now take the session directly (per upstream's `_MCPWrapperBase`); this
+    helper used to wrap a session in a connection-shaped namespace.
+    """
+    return session
 
 
 class _FakeTextContent:

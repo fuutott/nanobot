@@ -193,7 +193,7 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 | Area | What we keep | Why |
 |------|-------------|-----|
 | `agent/tools/oauth_flow.py`, `oauth_tokens.py` | Entire files (upstream-untouched) | OAuth device-flow + dynamic client registration + token storage |
-| `agent/tools/mcp.py` | `MCPConnection` class (composed inside upstream's `connect_single_server`) + `_resolve_oauth_token` + epoch-based reconnect on transient errors | Talk to OAuth 2.1 remote MCP servers; rebuild stale anyio streams without thundering-herd |
+| `agent/tools/mcp.py` | `_resolve_oauth_token` function + call site at top of upstream's `connect_single_server` that injects `Authorization: Bearer …` into HTTP transport headers | Talk to OAuth 2.1 remote MCP servers. Token re-resolves on every reconnect because upstream's `_refresh_terminated_server` calls `connect_single_server` again — refresh-token rotation happens for free. |
 | `agent/loop.py` | `_mcp_owner` task wrapping `_connect_mcp()` + `_start_oauth_refresh_task` + `_oauth_refresh_loop` | Isolate anyio cancel scopes from `run()`; refresh OAuth tokens before expiry |
 | `cli/commands.py` | `mcp-auth` Typer command (~230 lines at end of file) + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers | Interactive OAuth setup for remote MCP servers |
 | `config/schema.py` | `OAuthConfig` class + `MCPServerConfig.auth` field | Wire OAuth into MCP server config |
@@ -230,6 +230,7 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 
 - **Discord `group_policy="mention"` default** — used to be our fork's hard requirement; became the upstream default in v0.2.x. Nothing to preserve.
 - **`dream.interval_h=8` default** — dropped after upstream's Dream refactor (`d1a94dae` replaced two-phase Dream with simple cron + `process_direct`). Runtime config also reverted to upstream's 2h default; `maxBatchSize` and `maxIterations` are now deprecated fields.
+- **`MCPConnection` class + epoch-based reconnect** — dropped after upstream's `e9145b7a` / `d0eba7cd` added `_MCPWrapperBase` with `_refresh_session_after_termination` + `_attach_reconnect_handlers` + state-level `_reload_lock`. Upstream's coarser state-lock equivalently protects against thundering herd, and on session-terminated errors it tears down + rebuilds the whole server, swapping the live session into each wrapper. Only the OAuth token resolution remained local (now injected at the top of upstream's `connect_single_server`). `tests/agent/test_mcp_reconnect.py` deleted (its subject no longer exists).
 
 ## Local testing
 
