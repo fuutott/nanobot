@@ -844,6 +844,72 @@ async def test_connect_registers_resources_and_prompts(
     assert "mcp_test_prompt_prompt_c" in registry.tool_names
 
 
+@pytest.mark.asyncio
+async def test_reload_single_server_replaces_stack(
+    fake_mcp_runtime: dict[str, object | None],
+) -> None:
+    """reload_single_server tears down the existing stack and rebuilds it.
+
+    Used by the OAuth refresh loop so a freshly-refreshed token is picked up
+    by the live session immediately.
+    """
+    from nanobot.agent.tools.mcp import reload_single_server
+
+    fake_mcp_runtime["session"] = _make_fake_session_with_capabilities(
+        tool_names=["only_tool"],
+    )
+    registry = ToolRegistry()
+    cfg = MCPServerConfig(command="fake")
+
+    initial = await connect_mcp_servers({"srv": cfg}, registry)
+    assert "mcp_srv_only_tool" in registry.tool_names
+
+    closed = {"count": 0}
+
+    async def _aclose():
+        closed["count"] += 1
+
+    initial["srv"].aclose = _aclose  # spy on close
+
+    class _State:
+        # _reload_lock keys WeakKeyDictionary on the state object, so it can't be SimpleNamespace.
+        pass
+
+    state = _State()
+    state._mcp_servers = {"srv": cfg}
+    state._mcp_stacks = dict(initial)
+    state._mcp_connected = True
+
+    ok = await reload_single_server(state, registry, "srv", reason="test")
+
+    assert ok is True
+    assert closed["count"] == 1
+    # Stack pointer was replaced (new entry installed in state after rebuild).
+    assert state._mcp_stacks["srv"] is not initial["srv"]
+    # Tool re-registered after reload.
+    assert "mcp_srv_only_tool" in registry.tool_names
+    for stack in state._mcp_stacks.values():
+        await stack.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reload_single_server_skips_when_no_longer_configured(
+    fake_mcp_runtime: dict[str, object | None],
+) -> None:
+    from nanobot.agent.tools.mcp import reload_single_server
+
+    class _State:
+        pass
+
+    state = _State()
+    state._mcp_servers = {}
+    state._mcp_stacks = {}
+    state._mcp_connected = False
+
+    ok = await reload_single_server(state, ToolRegistry(), "missing")
+    assert ok is False
+
+
 # ---------------------------------------------------------------------------
 # _sanitize_name tests
 # ---------------------------------------------------------------------------

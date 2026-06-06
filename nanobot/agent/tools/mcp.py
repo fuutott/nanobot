@@ -1161,6 +1161,42 @@ async def _refresh_terminated_server(
         return registry.get(tool_name)
 
 
+async def reload_single_server(
+    state: Any,
+    registry: ToolRegistry,
+    server_name: str,
+    *,
+    reason: str = "manual reload",
+) -> bool:
+    """Tear down + rebuild one MCP server's connection. Shares ``_reload_lock``
+    with the session-terminated path so concurrent reloads serialize cleanly.
+
+    Used by the OAuth refresh loop so a freshly-refreshed token is picked up
+    by the live MCP session immediately (instead of waiting for the live
+    session to die from a 401 and then reconnect).
+
+    Returns True if the server reconnected successfully.
+    """
+    async with _reload_lock(state):
+        cfg = state._mcp_servers.get(server_name)
+        if cfg is None:
+            logger.warning("MCP server '{}' reload skipped: no longer configured", server_name)
+            return False
+
+        logger.info("MCP server '{}' reloading ({})", server_name, reason)
+        _unregister_server_tools(state, registry, server_name)
+        await _close_server(state, server_name)
+
+        connected = await connect_mcp_servers({server_name: cfg}, registry)
+        state._mcp_stacks.update(connected)
+        _attach_reconnect_handlers(state, registry, connected)
+        state._mcp_connected = bool(state._mcp_stacks)
+        if server_name not in connected:
+            logger.warning("MCP server '{}' reload failed", server_name)
+            return False
+        return True
+
+
 def _server_signature(cfg: Any) -> Any:
     if hasattr(cfg, "model_dump"):
         return cfg.model_dump(mode="json")

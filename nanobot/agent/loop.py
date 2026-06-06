@@ -1210,22 +1210,30 @@ class AgentLoop:
         self._schedule_background(self._oauth_refresh_loop())
 
     async def _oauth_refresh_loop(self) -> None:
-        """Periodically check and refresh OAuth tokens for MCP servers."""
+        """Periodically check and refresh OAuth tokens for MCP servers.
+
+        On a successful refresh, also reload that server's MCP connection so
+        the live session picks up the new bearer immediately — without it,
+        the live httpx client keeps the old token baked in until the next
+        session-terminated event, which means a stretch of failed tool calls
+        before the new token gets used.
+        """
         from time import time
 
-        from nanobot.agent.tools.oauth_tokens import (
-            token_expires_at,
-            get_refresh_token,
-        )
+        from nanobot.agent.tools.mcp import reload_single_server
         from nanobot.agent.tools.oauth_flow import (
-            discover_oauth_metadata,
-            _get_endpoints,
             _authorization_base_url,
-            refresh_access_token,
-            store_token_result,
+            _get_endpoints,
+            _resolve_env,
+            discover_oauth_metadata,
             get_client_credentials_token,
             load_registered_client,
-            _resolve_env,
+            refresh_access_token,
+            store_token_result,
+        )
+        from nanobot.agent.tools.oauth_tokens import (
+            get_refresh_token,
+            token_expires_at,
         )
 
         while self._running:
@@ -1258,6 +1266,7 @@ class AgentLoop:
                             if reg.client_secret:
                                 client_secret = reg.client_secret
 
+                    refreshed = False
                     if cfg.auth.flow == "client_credentials":
                         if client_id and client_secret:
                             result = await get_client_credentials_token(
@@ -1268,6 +1277,7 @@ class AgentLoop:
                             )
                             store_token_result(name, result)
                             logger.info("OAuth token for '{}' refreshed (client_credentials)", name)
+                            refreshed = True
                     else:
                         rt = get_refresh_token(name)
                         if rt and client_id:
@@ -1279,11 +1289,24 @@ class AgentLoop:
                             )
                             store_token_result(name, result)
                             logger.info("OAuth token for '{}' refreshed", name)
+                            refreshed = True
                         else:
                             logger.warning(
                                 "OAuth token for '{}' expiring and no refresh token. "
                                 "Run 'nanobot mcp-auth {}' to re-authenticate.",
                                 name, name,
+                            )
+
+                    if refreshed and name in self._mcp_stacks:
+                        try:
+                            await reload_single_server(
+                                self, self.tools, name,
+                                reason="oauth token refreshed",
+                            )
+                        except Exception as reload_exc:
+                            logger.warning(
+                                "MCP server '{}' reload after OAuth refresh failed: {}",
+                                name, reload_exc,
                             )
                 except Exception as e:
                     logger.warning("OAuth refresh failed for '{}': {}", name, e)
