@@ -55,8 +55,29 @@ def _is_transient(exc: BaseException) -> bool:
     return type(exc).__name__ in _TRANSIENT_EXC_NAMES
 
 
+# anyio stream-closed exceptions that mean the underlying transport is dead.
+# The send_nowait path raises these as bare exceptions with no error message,
+# so they aren't caught by the string-based marker check below.
+# Routing them through the session-terminated path triggers a full server
+# rebuild (close stack -> connect_mcp_servers -> re-attach reconnect handlers)
+# instead of the useless sleep-and-retry against a dead session.
+_STREAM_DEAD_EXC_NAMES: frozenset[str] = frozenset((
+    "ClosedResourceError",
+    "BrokenResourceError",
+    "EndOfStream",
+))
+
+
 def _is_session_terminated(exc: BaseException) -> bool:
-    """Return True when the MCP SDK reports a dead client session."""
+    """Return True when the MCP SDK reports a dead client session.
+
+    Matches either:
+    - exception **type name** in the anyio stream-dead set (no error message)
+    - a "session terminated" / "connection closed" marker in the exception's
+      ``str(exc)`` or ``exc.error.message`` (MCP SDK explicit errors)
+    """
+    if type(exc).__name__ in _STREAM_DEAD_EXC_NAMES:
+        return True
     messages = [str(exc)]
     error = getattr(exc, "error", None)
     if error is not None:

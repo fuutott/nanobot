@@ -84,6 +84,36 @@ def test_is_session_terminated_recognizes_connection_closed_mcp_error():
     assert _is_session_terminated(_connection_closed_error())
 
 
+def test_is_session_terminated_recognizes_closed_resource_by_type_name():
+    """ClosedResourceError from anyio carries no string content but the type
+    name alone is a reliable signal that the underlying transport is dead."""
+
+    class _CRE(Exception):
+        pass
+    _CRE.__name__ = "ClosedResourceError"
+    assert _is_session_terminated(_CRE())
+
+
+def test_is_session_terminated_recognizes_broken_resource_by_type_name():
+    class _BRE(Exception):
+        pass
+    _BRE.__name__ = "BrokenResourceError"
+    assert _is_session_terminated(_BRE())
+
+
+def test_is_session_terminated_recognizes_end_of_stream_by_type_name():
+    class _EOS(Exception):
+        pass
+    _EOS.__name__ = "EndOfStream"
+    assert _is_session_terminated(_EOS())
+
+
+def test_is_session_terminated_does_not_match_non_stream_transient():
+    """ConnectionResetError is still classified as plain-transient (not stream-dead),
+    so the wrapper's sleep+retry path is appropriate for it."""
+    assert not _is_session_terminated(ConnectionResetError("reset"))
+
+
 # ---------------------------------------------------------------------------
 # MCPToolWrapper retry behaviour
 # ---------------------------------------------------------------------------
@@ -238,10 +268,16 @@ async def test_tool_retry_on_end_of_stream():
 
 @pytest.mark.asyncio
 async def test_tool_reconnects_when_transient_retry_reveals_terminated_session():
-    """Tool should reconnect if a stale session reports termination after transient retry."""
+    """Tool should reconnect if a stale session reports termination after transient retry.
+
+    Uses ConnectionResetError as the first error rather than ClosedResourceError —
+    ClosedResourceError is now classified as session-terminated (it means the anyio
+    stream is dead, so reconnect-before-retry is the right path; see
+    ``_STREAM_DEAD_EXC_NAMES``). ConnectionResetError is still a "real" transient.
+    """
     old_session = AsyncMock()
     old_session.call_tool = AsyncMock(
-        side_effect=[_FakeClosedResourceError("closed"), _session_terminated_error()]
+        side_effect=[ConnectionResetError("reset by peer"), _session_terminated_error()]
     )
     new_session = AsyncMock()
     new_session.call_tool = AsyncMock(return_value=_make_tool_result("fresh"))
@@ -262,6 +298,39 @@ async def test_tool_reconnects_when_transient_retry_reveals_terminated_session()
 
     assert output == "fresh"
     assert old_session.call_tool.call_count == 2
+    assert new_session.call_tool.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_reconnects_immediately_on_closed_resource_error():
+    """ClosedResourceError on first attempt should trigger reconnect (not sleep+retry).
+
+    Regression test for the production bug where 3 parallel tool calls all hit a
+    dead session and exhausted retries because sleep+retry against the same dead
+    anyio streams couldn't succeed. The dead-stream exception type names are
+    routed through ``_is_session_terminated`` so the reconnect handler fires
+    on the first attempt.
+    """
+    old_session = AsyncMock()
+    old_session.call_tool = AsyncMock(side_effect=_FakeClosedResourceError("dead"))
+    new_session = AsyncMock()
+    new_session.call_tool = AsyncMock(return_value=_make_tool_result("fresh"))
+
+    wrapper = MCPToolWrapper(old_session, "test_server", _make_tool_def(), tool_timeout=5)
+    replacement = MCPToolWrapper(new_session, "test_server", _make_tool_def(), tool_timeout=5)
+
+    async def reconnect(server_name: str, tool_name: str, stale_tool):
+        return replacement
+
+    wrapper.set_reconnect_handler(reconnect)
+
+    with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
+        output = await wrapper.execute()
+
+    assert output == "fresh"
+    # Old session called once (failed), reconnect fired, new session called once (succeeded).
+    # No sleep+retry against the dead session.
+    assert old_session.call_tool.call_count == 1
     assert new_session.call_tool.call_count == 1
 
 
