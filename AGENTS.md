@@ -235,3 +235,15 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 ## Local testing
 
 Always test with `uv run pytest tests/`. Discord tests are skipped unless `discord.py` is installed (`pip install nanobot-ai[discord]`).
+
+### Windows host hangs the full suite — run in the container instead
+
+`uv run pytest tests/` on the Windows host hangs after specific tests (e.g. `tests/cli/test_restart_command.py::test_status_intercepted_in_run_loop`). The tests themselves PASS — pytest then wedges on async teardown because Windows' ProactorEventLoop leaves leaked tasks dangling. Subsequent tests in the same session never start. Each subdirectory run in isolation passes fine, but the full-suite run never completes.
+
+**Workaround**: run the suite inside the Docker container after `./redo.ps1`:
+
+```powershell
+docker compose exec nanobot uv run pytest tests/
+```
+
+Linux event-loop teardown does not have this issue, so the container run mirrors CI exactly. Use this whenever you need a full-suite verification before pushing.
