@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-
 from nanobot_channel_mcpserver import MCPServerChannel, MCPServerConfig
 
 

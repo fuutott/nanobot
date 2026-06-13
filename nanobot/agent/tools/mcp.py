@@ -21,6 +21,7 @@ from nanobot.bus.events import (
     RUNTIME_CONTROL_MCP_RELOAD,
     InboundMessage,
 )
+from nanobot.security.network import validate_url_target
 
 # Transient connection errors that warrant a single retry.
 # These typically happen when an MCP server restarts or a network
@@ -108,10 +109,21 @@ async def _probe_http_url(url: str, timeout: float = 3.0) -> bool:
             timeout=timeout,
         )
         writer.close()
-        await writer.wait_closed()
+        with suppress(OSError, asyncio.TimeoutError):
+            await asyncio.wait_for(writer.wait_closed(), timeout=0.2)
         return True
     except (OSError, asyncio.TimeoutError):
         return False
+
+
+async def _validate_mcp_request_url(request: httpx.Request) -> None:
+    """Validate each outgoing MCP HTTP request, including redirect targets."""
+    ok, error = validate_url_target(str(request.url))
+    if not ok:
+        raise httpx.RequestError(
+            f"Blocked unsafe MCP URL {request.url} ({error})",
+            request=request,
+        )
 
 
 def _windows_command_basename(command: str) -> str:
@@ -703,7 +715,19 @@ async def connect_mcp_servers(
                     await server_stack.aclose()
                     return name, None
 
-            # Local: resolve OAuth token (if configured) before opening HTTP transports.
+            if transport_type in {"sse", "streamableHttp"}:
+                ok, error = validate_url_target(cfg.url)
+                if not ok:
+                    logger.warning(
+                        "MCP server '{}': blocked unsafe URL {} ({})",
+                        name,
+                        cfg.url,
+                        error,
+                    )
+                    await server_stack.aclose()
+                    return name, None
+
+            # Resolve OAuth token (if configured) before opening HTTP transports.
             # Re-runs on every reconnect — refresh-token rotation happens here for free.
             request_headers = dict(cfg.headers or {})
             if cfg.auth and transport_type in ("sse", "streamableHttp"):
@@ -742,6 +766,7 @@ async def connect_mcp_servers(
                     }
                     return httpx.AsyncClient(
                         headers=merged_headers or None,
+                        event_hooks={"request": [_validate_mcp_request_url]},
                         follow_redirects=True,
                         timeout=timeout,
                         auth=auth,
@@ -759,6 +784,7 @@ async def connect_mcp_servers(
                 http_client = await server_stack.enter_async_context(
                     httpx.AsyncClient(
                         headers=request_headers or None,
+                        event_hooks={"request": [_validate_mcp_request_url]},
                         follow_redirects=True,
                         timeout=None,
                     )

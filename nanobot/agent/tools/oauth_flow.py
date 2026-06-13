@@ -21,8 +21,8 @@ import base64
 import hashlib
 import json
 import os
-import secrets
 import re
+import secrets
 import urllib.parse
 from typing import Any
 
@@ -30,7 +30,6 @@ import httpx
 from loguru import logger
 
 from nanobot.agent.tools.oauth_tokens import store_token
-
 
 # ---------------------------------------------------------------------------
 # Helpers

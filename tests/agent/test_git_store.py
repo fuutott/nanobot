@@ -1,10 +1,9 @@
 """Tests for GitStore — git-backed version control for memory files."""
 
+
 import pytest
-from pathlib import Path
 
-from nanobot.utils.gitstore import GitStore, CommitInfo
-
+from nanobot.utils.gitstore import CommitInfo, GitStore
 
 TRACKED = ["SOUL.md", "USER.md", "memory/MEMORY.md"]
 

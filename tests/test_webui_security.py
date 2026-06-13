@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from nanobot_channel_webui import WebUIChannel, WebUIConfig
 
 
