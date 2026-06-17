@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.filesystem import FileToolsConfig
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import ToolsConfig
 from nanobot.providers.base import LLMProvider
 
 
@@ -131,3 +133,29 @@ async def test_spawn_with_inherited_provider_does_not_invoke_factory(monkeypatch
     result = await sm.spawn(task="do thing")  # no provider/model
     assert "started" in result.lower()
     assert factory_calls == []
+
+
+def test_subagent_respects_file_tool_toggle(tmp_path):
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test"
+    sm = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=MessageBus(),
+        model="test",
+        max_tool_result_chars=16_000,
+        tools_config=ToolsConfig(file=FileToolsConfig(enable=False)),
+    )
+
+    tools = sm._build_tools()
+
+    file_tools = {
+        "apply_patch",
+        "edit_file",
+        "find_files",
+        "grep",
+        "list_dir",
+        "read_file",
+        "write_file",
+    }
+    assert file_tools.isdisjoint(tools.tool_names)

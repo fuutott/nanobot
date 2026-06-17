@@ -105,3 +105,4 @@ plugin-migration-plan.md
 .kilo/package-lock.json
 exp/
 .playwright-mcp/
+bridge/node_modules/

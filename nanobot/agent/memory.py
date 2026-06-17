@@ -13,7 +13,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
-import tiktoken
 from loguru import logger
 
 from nanobot.session.manager import Session
@@ -23,8 +22,10 @@ from nanobot.utils.helpers import (
     estimate_message_tokens,
     estimate_prompt_tokens_chain,
     find_legal_message_start,
+    recent_message_start_index,
     strip_think,
     truncate_text,
+    truncate_text_to_tokens,
 )
 from nanobot.utils.prompt_templates import render_template
 
@@ -61,6 +62,7 @@ class MemoryStore:
         self._cursor_file = self.memory_dir / ".cursor"
         self._dream_cursor_file = self.memory_dir / ".dream_cursor"
         self._corruption_logged = False  # rate-limit non-int cursor warning
+        self._malformed_entry_logged = False  # rate-limit bad history shape warning
         self._oversize_logged = False  # rate-limit oversized-entry warning
         self._append_lock = threading.Lock()  # serialize cursor allocation + append
         self._git = GitStore(workspace, tracked_files=[
@@ -295,8 +297,9 @@ class MemoryStore:
         return value
 
     def _iter_valid_entries(self) -> Iterator[tuple[dict[str, Any], int]]:
-        """Yield ``(entry, cursor)`` for entries with int cursors; warn once on corruption."""
+        """Yield ``(entry, cursor)`` for well-formed entries; warn once on corruption."""
         poisoned: Any = None
+        malformed_cursor: int | None = None
         for entry in self._read_entries():
             raw = entry.get("cursor")
             if raw is None:
@@ -304,6 +307,9 @@ class MemoryStore:
             cursor = self._valid_cursor(raw)
             if cursor is None:
                 poisoned = raw
+                continue
+            if not self._valid_history_payload(entry):
+                malformed_cursor = cursor
                 continue
             yield entry, cursor
         if poisoned is not None and not self._corruption_logged:
@@ -313,6 +319,22 @@ class MemoryStore:
                 "Usually caused by an external writer; further occurrences suppressed.",
                 poisoned,
             )
+        if malformed_cursor is not None and not self._malformed_entry_logged:
+            self._malformed_entry_logged = True
+            logger.warning(
+                "history.jsonl contains a malformed entry at cursor {}; dropping it. "
+                "Usually caused by an external writer; further occurrences suppressed.",
+                malformed_cursor,
+            )
+
+    @staticmethod
+    def _valid_history_payload(entry: dict[str, Any]) -> bool:
+        if not isinstance(entry.get("timestamp"), str):
+            return False
+        if not isinstance(entry.get("content"), str):
+            return False
+        session_key = entry.get("session_key")
+        return session_key is None or isinstance(session_key, str)
 
     def _next_cursor(self) -> int:
         """Read the current cursor counter and return the next value."""
@@ -482,24 +504,24 @@ class MemoryStore:
         skills_dir.mkdir(parents=True, exist_ok=True)
 
         extra_read = [BUILTIN_SKILLS_DIR] if BUILTIN_SKILLS_DIR.exists() else None
-        editable_roots = [self.soul_file, self.user_file, skills_dir]
+        editable_files = [self.memory_file, self.soul_file, self.user_file]
 
         tools.register(ReadFileTool(
             workspace=workspace,
             allowed_dir=workspace,
-            extra_allowed_dirs=extra_read,
+            extra_read_allowed_dirs=extra_read,
             file_states=file_states,
         ))
         tools.register(EditFileTool(
             workspace=workspace,
-            allowed_dir=self.memory_dir,
-            extra_allowed_dirs=editable_roots,
+            allowed_dir=skills_dir,
+            extra_write_allowed_files=editable_files,
             file_states=file_states,
         ))
         tools.register(ApplyPatchTool(
             workspace=workspace,
-            allowed_dir=self.memory_dir,
-            extra_allowed_dirs=editable_roots,
+            allowed_dir=skills_dir,
+            extra_write_allowed_files=editable_files,
             file_states=file_states,
         ))
         tools.register(WriteFileTool(
@@ -696,7 +718,13 @@ class Consolidator:
         if len(tail) <= replay_max_messages:
             return None
 
-        sliced = tail[-replay_max_messages:]
+        tail_messages = [message for _idx, message in tail]
+        start_idx = recent_message_start_index(
+            tail_messages,
+            replay_max_messages,
+            extend_to_user=True,
+        )
+        sliced = tail[start_idx:]
         for i, (_idx, message) in enumerate(sliced):
             if message.get("role") == "user":
                 start = i
@@ -785,14 +813,7 @@ class Consolidator:
         budget = self._input_token_budget
         if budget <= 0:
             return truncate_text(text, _RAW_ARCHIVE_MAX_CHARS)
-        try:
-            enc = tiktoken.get_encoding("cl100k_base")
-            tokens = enc.encode(text)
-            if len(tokens) <= budget:
-                return text
-            return enc.decode(tokens[:budget]) + "\n... (truncated)"
-        except Exception:
-            return truncate_text(text, budget * 4)
+        return truncate_text_to_tokens(text, budget)
 
     async def archive(
         self,
@@ -985,7 +1006,7 @@ class Consolidator:
                 metadata={},
                 last_consolidated=0,
             )
-            dropped, already_consolidated = probe.retain_recent_legal_suffix(max_suffix)
+            dropped, already_consolidated = probe.retain_recent_legal_suffix(max_suffix, extend_to_user=True)
             messages_to_keep = probe.messages
             messages_to_remove = dropped[already_consolidated:]
 
