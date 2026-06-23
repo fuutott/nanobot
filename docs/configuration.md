@@ -201,7 +201,7 @@ Tracing covers the providers that go through nanobot's OpenAI-compatible client 
 > - **VolcEngine / BytePlus Coding Plan**: Subscription endpoints are configured through dedicated providers `volcengineCodingPlan` or `byteplusCodingPlan`, separate from the pay-per-use `volcengine` / `byteplus` providers.
 > - **Zhipu Coding Plan**: If you're on Zhipu's coding plan, set `"apiBase": "https://open.bigmodel.cn/api/coding/paas/v4"` in your zhipu provider config.
 > - **Alibaba Cloud BaiLian**: If you're using Alibaba Cloud BaiLian's OpenAI-compatible endpoint, set `"apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1"` in your dashscope provider config.
-> - **StepFun Step Plan**: If you're on StepFun's Step Plan subscription, set `"apiBase": "https://api.stepfun.com/step_plan/v1"` in your stepfun provider config. Supported models include `step-3.5-flash`, `step-3.5-flash-2603`, and `step-router-v1`.
+> - **StepFun Step Plan**: If you're on StepFun's Step Plan subscription, set `"apiBase": "https://api.stepfun.ai/step_plan/v1"` in your stepfun provider config. Supported models include `step-3.5-flash`, `step-3.5-flash-2603`, and `step-router-v1`.
 > - **Step Fun (Mainland China)**: If your API key is from Step Fun's mainland China platform (stepfun.com), set `"apiBase": "https://api.stepfun.com/v1"` in your stepfun provider config.
 > - **Xiaomi MiMo thinking mode**: MiMo models (e.g. `mimo-v2.5-pro`) default to enabled thinking. Use `agents.defaults.reasoningEffort: "none"` to disable it, or `"low"` / `"medium"` / `"high"` to keep it on. Omitting the field preserves the provider's per-model default.
 > - **Xiaomi MiMo Token Plan**: If you're on MiMo's token plan, set `"apiBase": "https://token-plan-sgp.xiaomimimo.com/v1"` in your xiaomi_mimo provider config.
@@ -752,7 +752,7 @@ Step Plan is StepFun's subscription-based service for high-frequency AI develope
   "providers": {
     "stepfun": {
       "apiKey": "${STEPFUN_API_KEY}",
-      "apiBase": "https://api.stepfun.com/step_plan/v1"
+      "apiBase": "https://api.stepfun.ai/step_plan/v1"
     }
   },
   "modelPresets": {
@@ -1456,7 +1456,7 @@ By default, web search uses `duckduckgo`, and it works out of the box without an
 | `olostep` | `apiKey` | `OLOSTEP_API_KEY` | No |
 | `bocha` | `apiKey` | `BOCHA_API_KEY` | Free tier (1M calls for startups) |
 | `volcengine` | `apiKey` | `VOLCENGINE_SEARCH_API_KEY` or `WEB_SEARCH_API_KEY` | Monthly quota, then paid |
-| `keenable` | `apiKey` | `KEENABLE_API_KEY` | No |
+| `keenable` | `apiKey` (optional) | `KEENABLE_API_KEY` | Yes (no key needed; key raises limits) |
 | `searxng` | `baseUrl` | `SEARXNG_BASE_URL` | Yes (self-hosted) |
 | `duckduckgo` (default) | — | — | Yes |
 
@@ -1566,21 +1566,20 @@ You can set `BOCHA_API_KEY` in the environment instead of storing it in config.
 
 You can also set `WEB_SEARCH_API_KEY` for compatibility with the Volcengine web-search skill. Create the key in the [Volcengine web search console](https://console.volcengine.com/search-infinity/web-search), then copy it from [API keys](https://console.volcengine.com/search-infinity/api-key). Volcengine Ark keys are separate and do not work for this search provider.
 
-**Keenable:**
+**Keenable** (works without an API key on the free tier):
 ```json
 {
   "tools": {
     "web": {
       "search": {
-        "provider": "keenable",
-        "apiKey": "${KEENABLE_API_KEY}"
+        "provider": "keenable"
       }
     }
   }
 }
 ```
 
-Create a key at [keenable.ai](https://keenable.ai). You can also set `KEENABLE_API_KEY` in the environment instead of storing it in config.
+Keenable search works out of the box with no account, via its token-less public endpoint (free tier, limited to 1,000 requests/hour). Set `apiKey` (or `KEENABLE_API_KEY`) from [keenable.ai](https://keenable.ai) to remove the hourly limit.
 
 **SearXNG** (self-hosted, no API key needed):
 ```json
