@@ -124,6 +124,47 @@ def test_parse_dict_preserves_extra_content() -> None:
     assert payload["extra_content"] == GEMINI_EXTRA
 
 
+def test_parse_dict_deduplicates_duplicate_tool_call_ids() -> None:
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider()
+
+    response_dict = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_same",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path":"a.txt"}'},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            },
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_same",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path":"b.txt"}'},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            },
+        ],
+    }
+
+    result = provider._parse(response_dict)
+
+    ids = [tc.id for tc in result.tool_calls]
+    assert len(ids) == 2
+    assert ids[0] == "call_same"
+    assert ids[1] != "call_same"
+    assert len(set(ids)) == 2
+    assert [tc.arguments for tc in result.tool_calls] == [{"path": "a.txt"}, {"path": "b.txt"}]
+
+
 # ── _parse_chunks: streaming round-trip ───────────────────────────────
 
 def test_parse_chunks_sdk_preserves_extra_content() -> None:

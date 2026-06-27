@@ -1,5 +1,6 @@
 """Session management for conversation history."""
 
+import base64
 import json
 import os
 import re
@@ -403,13 +404,52 @@ class SessionManager:
         """Public helper used by HTTP handlers to map an arbitrary key to a stable filename stem."""
         return safe_filename(key.replace(":", "_"))
 
+    @staticmethod
+    def _storage_key(key: str) -> str:
+        """Collision-resistant encoding for internal session storage filenames."""
+        return base64.urlsafe_b64encode(key.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_storage_key(stem: str) -> str | None:
+        """Reverse _storage_key(): decode a base64url (no-padding) stem back to the original key."""
+        try:
+            # Restore padding stripped by rstrip("=")
+            padding = 4 - len(stem) % 4
+            if padding != 4:
+                stem += "=" * padding
+            return base64.urlsafe_b64decode(stem).decode("utf-8")
+        except Exception:
+            return None
+
     def _get_session_path(self, key: str) -> Path:
-        """Get the file path for a session."""
-        return self.sessions_dir / f"{self.safe_key(key)}.jsonl"
+        """Get the collision-resistant workspace path for a session."""
+        return self.sessions_dir / f"{self._storage_key(key)}.jsonl"
+
+    def _get_legacy_lossy_path(self, key: str) -> Path:
+        """Previous workspace session path using lossy ':' to '_' replacement."""
+        return self.sessions_dir / f"{safe_filename(key.replace(':', '_'))}.jsonl"
 
     def _get_legacy_session_path(self, key: str) -> Path:
         """Legacy global session path (~/.nanobot/sessions/)."""
         return self.legacy_sessions_dir / f"{self.safe_key(key)}.jsonl"
+
+    @staticmethod
+    def _stored_key_for_path(path: Path) -> str | None:
+        """Read the stored session key from a JSONL metadata row, if present."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("_type") == "metadata":
+                        stored_key = data.get("key")
+                        return stored_key if isinstance(stored_key, str) else None
+                    return None
+        except Exception:
+            return None
+        return None
 
     def get_or_create(self, key: str) -> Session:
         """
@@ -435,13 +475,28 @@ class SessionManager:
         """Load a session from disk."""
         path = self._get_session_path(key)
         if not path.exists():
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
+            fallback_paths = [
+                (self._get_legacy_lossy_path(key), "legacy lossy path"),
+                (self._get_legacy_session_path(key), "legacy path"),
+            ]
+            for fallback_path, description in fallback_paths:
+                if not fallback_path.exists():
+                    continue
+                stored_key = self._stored_key_for_path(fallback_path)
+                if stored_key and stored_key != key:
+                    logger.info(
+                        "Skipping migration for {} from {} because it belongs to {}",
+                        key,
+                        description,
+                        stored_key,
+                    )
+                    continue
                 try:
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
+                    shutil.move(str(fallback_path), str(path))
+                    logger.info("Migrated session {} from {}", key, description)
                 except Exception:
                     logger.exception("Failed to migrate session {}", key)
+                break
 
         if not path.exists():
             return None
@@ -623,7 +678,11 @@ class SessionManager:
 
         Returns True if at least one JSONL file was found and unlinked.
         """
-        paths = [self._get_session_path(key), self._get_legacy_session_path(key)]
+        paths = [
+            self._get_session_path(key),
+            self._get_legacy_lossy_path(key),
+            self._get_legacy_session_path(key),
+        ]
         self.invalidate(key)
         deleted = False
         for path in paths:
@@ -784,7 +843,8 @@ class SessionManager:
         sessions = []
 
         for path in self.sessions_dir.glob("*.jsonl"):
-            fallback_key = path.stem.replace("_", ":", 1)
+            decoded = self._decode_storage_key(path.stem)
+            fallback_key = decoded or path.stem.replace("_", ":", 1)
             try:
                 # Read the metadata line and a small preview for session lists.
                 with open(path, encoding="utf-8") as f:
@@ -792,7 +852,7 @@ class SessionManager:
                     if first_line:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
-                            key = data.get("key") or path.stem.replace("_", ":", 1)
+                            key = data.get("key") or fallback_key
                             metadata = data.get("metadata", {})
                             title = _metadata_title(metadata)
                             preview = ""
