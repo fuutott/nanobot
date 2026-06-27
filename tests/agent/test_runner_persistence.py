@@ -193,7 +193,10 @@ async def test_runner_keeps_going_when_tool_result_persistence_fails():
     tools.execute = AsyncMock(return_value="tool result")
 
     runner = AgentRunner(provider)
-    with patch("nanobot.agent.runner.maybe_persist_tool_result", side_effect=RuntimeError("disk full")):
+    with patch(
+        "nanobot.agent.context_governance.maybe_persist_tool_result",
+        side_effect=RuntimeError("disk full"),
+    ):
         result = await runner.run(AgentRunSpec(
             initial_messages=[{"role": "user", "content": "do task"}],
             tools=tools,

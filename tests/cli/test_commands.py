@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from nanobot.agent.memory import MemoryStore
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.cli import commands as cli_commands
 from nanobot.cli.commands import app
@@ -138,6 +139,19 @@ def test_gateway_tty_signal_mode_restores_ctrl_c(monkeypatch) -> None:
     finally:
         os.close(master_fd)
         os.close(slave_fd)
+
+
+def test_disabled_dream_cursor_only_advances_when_behind(tmp_path) -> None:
+    store = MemoryStore(tmp_path)
+    store.append_history("first")
+    store.append_history("second")
+
+    cli_commands._advance_dream_cursor_if_behind(store)
+    assert store.get_last_dream_cursor() == 2
+
+    store.set_last_dream_cursor(10)
+    cli_commands._advance_dream_cursor_if_behind(store)
+    assert store.get_last_dream_cursor() == 10
 
 
 @pytest.fixture
@@ -1288,6 +1302,21 @@ def test_heartbeat_skips_bundled_template():
     from nanobot.utils.helpers import load_bundled_template
 
     assert _heartbeat_has_active_tasks(load_bundled_template("HEARTBEAT.md")) is False
+
+
+def test_heartbeat_target_skips_archived_webui_sessions():
+    from nanobot.cli.commands import _pick_heartbeat_target_from_sessions
+
+    target = _pick_heartbeat_target_from_sessions(
+        enabled_channels=["websocket"],
+        archived_keys=["websocket:archived"],
+        sessions=[
+            {"key": "websocket:archived"},
+            {"key": "websocket:active"},
+        ],
+    )
+
+    assert target == ("websocket", "active")
 
 
 def _write_instance_config(tmp_path: Path) -> Path:
