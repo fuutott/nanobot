@@ -1,13 +1,8 @@
 # syntax=docker/dockerfile:1.7
-FROM node:24-bookworm-slim AS webui-builder
-
-WORKDIR /app
-COPY webui/package.json webui/package-lock.json ./webui/
-WORKDIR /app/webui
-RUN npm ci
-COPY webui/ ./
-RUN mkdir -p /app/nanobot/web && npm run build
-
+# We use nanobot-channel-webui plugin (port 18792, ships its own dist) instead
+# of the in-tree gateway webui — so we skip upstream's node:24 webui-builder
+# stage and the COPY of nanobot/web/dist/. NANOBOT_SKIP_WEBUI_BUILD=1 also
+# prevents the hatch build hook from trying to build it during pip install.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
@@ -25,10 +20,9 @@ RUN mkdir -p nanobot && touch nanobot/__init__.py && \
 
 # Copy the full source and install
 COPY nanobot/ nanobot/
-COPY --from=webui-builder /app/nanobot/web/dist/ nanobot/web/dist/
 COPY plugins/ plugins/
-# Skip the upstream hatch webui build — the COPY above provides the in-tree dist,
-# and nanobot-channel-webui plugin ships its own dist for the plugin route.
+# In-tree gateway webui is intentionally absent (no nanobot/web/dist/) —
+# the nanobot-channel-webui plugin provides the UI on port 18792.
 RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[discord]" && \
         uv pip install --system --no-cache \
             /app/plugins/nanobot-channel-webui \
