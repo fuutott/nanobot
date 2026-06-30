@@ -186,6 +186,7 @@ class ProviderConfig(Base):
     extra_body: dict[str, Any] | None = None  # Extra provider request fields; shape depends on provider/API surface
     extra_query: dict[str, str] | None = None  # Extra query params (e.g. api-version for Azure-style gateways)
     thinking_style: str | None = None  # Thinking/reasoning style for custom providers
+    strip_history_reasoning_content: bool = False  # Strip reasoning_content from assistant history before sending (set true for providers like Cerebras that reject the field on the wire)
 
     # Valid values mirror the keys of _THINKING_STYLE_MAP in
     # nanobot/providers/openai_compat_provider.py. Kept duplicated here to

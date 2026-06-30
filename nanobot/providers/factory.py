@@ -75,6 +75,9 @@ def _make_provider_core(
             spec = create_dynamic_spec(
                 provider_name,
                 thinking_style=(p.thinking_style or "") if p else "",
+                strip_history_reasoning_content=bool(
+                    getattr(p, "strip_history_reasoning_content", False)
+                ),
             )
     if spec and spec.is_transcription_only:
         raise ValueError(f"Provider '{provider_name}' only supports transcription.")
@@ -239,6 +242,8 @@ def provider_signature(
             fp.extra_body if fp else None,
             fp.api_type if fp else "auto",
             fp.extra_query if fp else None,
+            getattr(fp, "thinking_style", None) if fp else None,
+            getattr(fp, "strip_history_reasoning_content", False) if fp else False,
             getattr(fp, "region", None) if fp else None,
             getattr(fp, "profile", None) if fp else None,
             fallback.max_tokens,
@@ -259,6 +264,8 @@ def provider_signature(
         p.extra_body if p else None,
         p.api_type if p else "auto",
         p.extra_query if p else None,
+        getattr(p, "thinking_style", None) if p else None,
+        getattr(p, "strip_history_reasoning_content", False) if p else False,
         getattr(p, "region", None) if p else None,
         getattr(p, "profile", None) if p else None,
         resolved.max_tokens,
