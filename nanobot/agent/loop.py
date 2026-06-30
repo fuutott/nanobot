@@ -412,12 +412,21 @@ class AgentLoop:
         # api_key is set, or the spec is key-exempt (local/oauth/direct).
         from nanobot.providers.registry import find_by_name as _find_provider_spec
         available_providers: list[str] = []
+        # Built-in declared providers (openrouter, zhipu, anthropic, ...)
         for name in sorted(config.providers.model_fields.keys()):
             entry = getattr(config.providers, name, None)
             has_key = bool(entry and getattr(entry, "api_key", None))
             spec = _find_provider_spec(name)
             key_exempt = bool(spec and (spec.is_local or spec.is_oauth or spec.is_direct))
             if has_key or key_exempt:
+                available_providers.append(name)
+        # Custom providers (extra-fields enabled via ConfigDict(extra="allow"));
+        # the factory routes these via _custom_provider_by_name. A user-defined
+        # OpenAI-compatible endpoint is usable as long as it has an api_base.
+        for name, entry in sorted((config.providers.model_extra or {}).items()):
+            has_key = bool(getattr(entry, "api_key", None))
+            has_base = bool(getattr(entry, "api_base", None))
+            if has_key or has_base:
                 available_providers.append(name)
         preset_names = list(config.model_presets.keys()) if config.model_presets else []
         fallback_model_names = [
