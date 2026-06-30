@@ -7,10 +7,6 @@ services:
     image: nanobot
     command: ["gateway"]
     restart: unless-stopped
-    environment:
-      # Debug: dump every outgoing LLM request to a JSON file in the workspace
-      # under _llm_dumps/. Set to "0" (or remove) to disable.
-      NANOBOT_DUMP_LLM_CALLS: "1"
     logging:
       driver: "json-file"
       options:

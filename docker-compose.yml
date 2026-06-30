@@ -5,10 +5,6 @@ x-common-config: &common-config
   volumes:
     - ~/.nanobot:/home/nanobottie/.nanobot
     - ~/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit
-  environment:
-    # Debug: dump every outgoing LLM request to a JSON file in the workspace
-    # under _llm_dumps/. Set to "0" (or remove) to disable.
-    NANOBOT_DUMP_LLM_CALLS: "1"
   cap_drop:
     - ALL
   cap_add:
