@@ -60,6 +60,17 @@ if TYPE_CHECKING:
                 "subagent."
             ),
         ),
+        skills=ArraySchema(
+            items=StringSchema(""),
+            description=(
+                "Optional whitelist of skill names listed in the subagent's "
+                "system prompt (e.g. [\"adhd\"]). Omit to inherit every "
+                "available skill (~1500 tokens of skill catalog in a default "
+                "workspace). Pass [] to strip the skill catalog entirely "
+                "(best for lightweight tasks where the subagent doesn't need "
+                "to consult any skills). Ignored when systemPrompt is set."
+            ),
+        ),
         required=["task"],
     )
 )
@@ -110,6 +121,7 @@ class SpawnTool(Tool, ContextAware):
         model: str | None = None,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        skills: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""
@@ -134,4 +146,5 @@ class SpawnTool(Tool, ContextAware):
             model=model,
             system_prompt=system_prompt,
             tools=tools,
+            skills=skills,
         )

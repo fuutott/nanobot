@@ -176,6 +176,7 @@ class SubagentManager:
         model: str | None = None,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        skills: list[str] | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
 
@@ -193,6 +194,13 @@ class SubagentManager:
         spawn); a short list (e.g. ``["write_file"]``) drops the schema budget
         to just the listed tools. Big input-token savings for fan-out where
         each subagent only needs a couple of tools.
+
+        ``skills`` whitelists which skills appear in the subagent's system
+        prompt skills-summary block (~1500 tokens for a default workspace).
+        ``None`` inherits all skills; ``[]`` strips the skill block entirely;
+        a short list (e.g. ``["adhd"]``) keeps only the named skills. Ignored
+        when ``system_prompt`` is set (the caller's prompt replaces the whole
+        block anyway).
         """
         if (provider or model) and self._provider_factory is None:
             return (
@@ -231,6 +239,7 @@ class SubagentManager:
                 model,
                 system_prompt,
                 tools,
+                skills,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -264,6 +273,7 @@ class SubagentManager:
         model_override: str | None = None,
         system_prompt_override: str | None = None,
         tools_filter: list[str] | None = None,
+        skills_filter: list[str] | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -294,7 +304,14 @@ class SubagentManager:
                     task_id, len(system_prompt_override),
                 )
             else:
-                system_prompt = self._build_subagent_prompt(workspace=root)
+                if skills_filter is not None:
+                    logger.info(
+                        "Subagent [{}] skill whitelist: {}",
+                        task_id, sorted(skills_filter) if skills_filter else "(none)",
+                    )
+                system_prompt = self._build_subagent_prompt(
+                    workspace=root, skills_filter=skills_filter,
+                )
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -438,17 +455,33 @@ class SubagentManager:
             lines.append(f"- {result.error}")
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
-    def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
-        """Build a focused system prompt for the subagent."""
+    def _build_subagent_prompt(
+        self,
+        workspace: Path | None = None,
+        skills_filter: list[str] | None = None,
+    ) -> str:
+        """Build a focused system prompt for the subagent.
+
+        ``skills_filter`` whitelists which skills are listed in the prompt's
+        skills summary. ``None`` includes every available skill (default).
+        ``[]`` includes no skills at all (useful for tight token budgets).
+        A non-empty list includes only the named skills.
+        """
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         root = workspace or self.workspace
-        skills_summary = SkillsLoader(
-            root,
-            disabled_skills=self.disabled_skills,
-        ).build_skills_summary()
+        loader = SkillsLoader(root, disabled_skills=self.disabled_skills)
+        if skills_filter is None:
+            skills_summary = loader.build_skills_summary()
+        elif not skills_filter:
+            skills_summary = ""
+        else:
+            # Exclude everything except the whitelisted skill names.
+            allowed = set(skills_filter)
+            all_names = {s["name"] for s in loader.list_skills(filter_unavailable=False)}
+            skills_summary = loader.build_skills_summary(exclude=all_names - allowed)
         return render_template(
             "agent/subagent_system.md",
             time_ctx=time_ctx,
