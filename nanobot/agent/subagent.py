@@ -173,12 +173,18 @@ class SubagentManager:
         workspace_scope: WorkspaceScope | None = None,
         provider: str | None = None,
         model: str | None = None,
+        system_prompt: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
 
         ``provider`` / ``model`` override the inherited provider/model just for
         this subagent. Pass either, both, or neither. Validated up-front so the
         caller gets an immediate error rather than a silent background failure.
+
+        ``system_prompt`` replaces the inherited full parent prompt
+        (AGENTS.md + skills + tool schemas + runtime context, ~10K tokens) with
+        a minimal user-supplied prompt. Use for lightweight tasks where the
+        subagent doesn't need the full instruction set.
         """
         if (provider or model) and self._provider_factory is None:
             return (
@@ -215,6 +221,7 @@ class SubagentManager:
                 workspace_scope,
                 provider,
                 model,
+                system_prompt,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -246,6 +253,7 @@ class SubagentManager:
         workspace_scope: WorkspaceScope | None = None,
         provider_override: str | None = None,
         model_override: str | None = None,
+        system_prompt_override: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -261,7 +269,14 @@ class SubagentManager:
                 cfg = self._subagent_tools_config()
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
             tools = self._build_tools(workspace=root, tools_config=cfg)
-            system_prompt = self._build_subagent_prompt(workspace=root)
+            if system_prompt_override is not None:
+                system_prompt = system_prompt_override
+                logger.info(
+                    "Subagent [{}] using system_prompt override ({} chars)",
+                    task_id, len(system_prompt_override),
+                )
+            else:
+                system_prompt = self._build_subagent_prompt(workspace=root)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},

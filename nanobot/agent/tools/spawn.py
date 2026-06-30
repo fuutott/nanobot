@@ -37,6 +37,13 @@ if TYPE_CHECKING:
             "Defaults to the main agent's model. "
             "Run `my check available_models` to see configured presets."
         ),
+        systemPrompt=StringSchema(
+            "Optional minimal system prompt for lightweight tasks. "
+            "Omit to inherit the full parent system prompt (AGENTS.md, skills, "
+            "tool schemas, runtime context — ~10K tokens). Provide a short "
+            "string to drastically cut input cost when the task doesn't need "
+            "the full instruction set (e.g. 'Write a one-page story.')."
+        ),
         required=["task"],
     )
 )
@@ -85,6 +92,7 @@ class SpawnTool(Tool, ContextAware):
         temperature: float | None = None,
         provider: str | None = None,
         model: str | None = None,
+        system_prompt: str | None = None,
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""
@@ -107,4 +115,5 @@ class SpawnTool(Tool, ContextAware):
             workspace_scope=current_workspace_scope(),
             provider=provider,
             model=model,
+            system_prompt=system_prompt,
         )
