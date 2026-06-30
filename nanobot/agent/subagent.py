@@ -139,6 +139,7 @@ class SubagentManager:
         self,
         workspace: Path | None = None,
         tools_config: ToolsConfig | None = None,
+        allowed_tools: set[str] | None = None,
     ) -> ToolRegistry:
         """Build an isolated subagent tool registry via ToolLoader."""
         root = self.workspace if workspace is None else workspace
@@ -153,7 +154,7 @@ class SubagentManager:
                 workspace=root,
             ),
         )
-        ToolLoader().load(ctx, registry, scope="subagent")
+        ToolLoader().load(ctx, registry, scope="subagent", allowed_tools=allowed_tools)
         return registry
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
@@ -174,6 +175,7 @@ class SubagentManager:
         provider: str | None = None,
         model: str | None = None,
         system_prompt: str | None = None,
+        tools: list[str] | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
 
@@ -185,6 +187,12 @@ class SubagentManager:
         (AGENTS.md + skills + tool schemas + runtime context, ~10K tokens) with
         a minimal user-supplied prompt. Use for lightweight tasks where the
         subagent doesn't need the full instruction set.
+
+        ``tools`` whitelists the tools available to the subagent. None inherits
+        the full parent tool set (~5K tokens of tool-schema preamble per
+        spawn); a short list (e.g. ``["write_file"]``) drops the schema budget
+        to just the listed tools. Big input-token savings for fan-out where
+        each subagent only needs a couple of tools.
         """
         if (provider or model) and self._provider_factory is None:
             return (
@@ -222,6 +230,7 @@ class SubagentManager:
                 provider,
                 model,
                 system_prompt,
+                tools,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -254,6 +263,7 @@ class SubagentManager:
         provider_override: str | None = None,
         model_override: str | None = None,
         system_prompt_override: str | None = None,
+        tools_filter: list[str] | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -268,7 +278,15 @@ class SubagentManager:
             if workspace_scope is not None:
                 cfg = self._subagent_tools_config()
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
-            tools = self._build_tools(workspace=root, tools_config=cfg)
+            allowed_tools = set(tools_filter) if tools_filter is not None else None
+            if allowed_tools is not None:
+                logger.info(
+                    "Subagent [{}] tool whitelist: {}",
+                    task_id, sorted(allowed_tools),
+                )
+            tools = self._build_tools(
+                workspace=root, tools_config=cfg, allowed_tools=allowed_tools,
+            )
             if system_prompt_override is not None:
                 system_prompt = system_prompt_override
                 logger.info(

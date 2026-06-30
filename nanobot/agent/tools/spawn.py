@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.context import ContextAware, RequestContext
-from nanobot.agent.tools.schema import NumberSchema, StringSchema, tool_parameters_schema
+from nanobot.agent.tools.schema import (
+    ArraySchema,
+    NumberSchema,
+    StringSchema,
+    tool_parameters_schema,
+)
 from nanobot.security.workspace_access import current_workspace_scope
 
 if TYPE_CHECKING:
@@ -43,6 +48,17 @@ if TYPE_CHECKING:
             "tool schemas, runtime context — ~10K tokens). Provide a short "
             "string to drastically cut input cost when the task doesn't need "
             "the full instruction set (e.g. 'Write a one-page story.')."
+        ),
+        tools=ArraySchema(
+            items=StringSchema(""),
+            description=(
+                "Optional whitelist of tool names the subagent may use (e.g. "
+                "[\"write_file\", \"read_file\"]). Omit to inherit the full "
+                "parent tool set (~5K tokens of tool-schema preamble per spawn). "
+                "Provide a short list to cut input cost when the task only "
+                "needs a couple of tools. Pass [] for a no-tools text-only "
+                "subagent."
+            ),
         ),
         required=["task"],
     )
@@ -93,6 +109,7 @@ class SpawnTool(Tool, ContextAware):
         provider: str | None = None,
         model: str | None = None,
         system_prompt: str | None = None,
+        tools: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""
@@ -116,4 +133,5 @@ class SpawnTool(Tool, ContextAware):
             provider=provider,
             model=model,
             system_prompt=system_prompt,
+            tools=tools,
         )

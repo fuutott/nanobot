@@ -83,7 +83,22 @@ class ToolLoader:
         self._plugins = plugins
         return plugins
 
-    def load(self, ctx: Any, registry: ToolRegistry, *, scope: str = "core") -> list[str]:
+    def load(
+        self,
+        ctx: Any,
+        registry: ToolRegistry,
+        *,
+        scope: str = "core",
+        allowed_tools: set[str] | None = None,
+    ) -> list[str]:
+        """Discover and register tools into ``registry``.
+
+        ``allowed_tools``: when set, only tools whose ``name`` is in the set
+        are registered. Useful for subagent fan-out where the parent wants to
+        narrow the tool surface to keep schema-preamble token cost low.
+        ``None`` (default) registers every tool that passes the scope/enable
+        gate, preserving prior behavior.
+        """
         registered: list[str] = []
         builtin_names: set[str] = set()
         sources = [(self.discover(), False), (self._discover_plugins().values(), True)]
@@ -96,6 +111,8 @@ class ToolLoader:
                     if not tool_cls.enabled(ctx):
                         continue
                     tool = tool_cls.create(ctx)
+                    if allowed_tools is not None and tool.name not in allowed_tools:
+                        continue
                     if registry.has(tool.name):
                         if is_plugin_source and tool.name in builtin_names:
                             logger.warning(
