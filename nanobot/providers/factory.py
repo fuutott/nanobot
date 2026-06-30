@@ -82,6 +82,11 @@ def _make_provider_core(
     if spec and spec.is_transcription_only:
         raise ValueError(f"Provider '{provider_name}' only supports transcription.")
     backend = spec.backend if spec else "openai_compat"
+    if p and p.proxy and backend not in {"openai_compat", "openai_codex"}:
+        raise ValueError(
+            f"providers.{provider_name}.proxy is only supported for "
+            "OpenAI-compatible providers and OpenAI Codex."
+        )
 
     api_base = p.api_base if p and p.api_base else None
     if not api_base and spec and (spec.is_gateway or spec.is_local):
@@ -109,7 +114,10 @@ def _make_provider_core(
     if backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
-        provider = OpenAICodexProvider(default_model=model)
+        provider = OpenAICodexProvider(
+            default_model=model,
+            proxy=getattr(p, "proxy", None) if p else None,
+        )
     elif backend == "azure_openai":
         from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
 
@@ -154,6 +162,7 @@ def _make_provider_core(
             extra_body=p.extra_body if p else None,
             api_type=p.api_type if p and provider_name == "openai" else "auto",
             extra_query=p.extra_query if p else None,
+            proxy=p.proxy if p else None,
         )
 
     provider.generation = resolved.to_generation_settings()
@@ -250,6 +259,7 @@ def provider_signature(
             fallback.temperature,
             fallback.reasoning_effort,
             fallback.context_window_tokens,
+            getattr(fp, "proxy", None) if fp else None,
         )
 
     provider_name = config.get_provider_name(resolved.model, preset=resolved)
@@ -272,6 +282,7 @@ def provider_signature(
         resolved.temperature,
         resolved.reasoning_effort,
         resolved.context_window_tokens,
+        getattr(p, "proxy", None) if p else None,
         tuple(_fallback_signature(fallback) for fallback in fallback_presets),
     )
 
