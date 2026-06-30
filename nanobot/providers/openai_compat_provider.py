@@ -140,6 +140,57 @@ def _gateway_reasoning_extra_body(style: str, effort: str | None) -> dict[str, A
     return builder(effort) if builder else None
 
 
+_LLM_DUMP_COUNTER = 0
+
+
+def _dump_llm_call(payload: dict[str, Any], *, label: str) -> None:
+    """Dump an outgoing LLM request payload to disk for analysis.
+
+    Gated by env var NANOBOT_DUMP_LLM_CALLS=1. Writes one JSON file per call to
+    ``$NANOBOT_DUMP_LLM_DIR`` (default: ``~/.nanobot/workspace/_llm_dumps``).
+    Each file is named ``<counter>_<label>_<model>.json`` so the order of
+    calls and which model received them is obvious at a glance.
+
+    Best-effort: any error here is swallowed so a dump-bug never breaks the
+    actual LLM call.
+    """
+    if os.environ.get("NANOBOT_DUMP_LLM_CALLS", "0") not in ("1", "true", "TRUE", "yes"):
+        return
+    try:
+        global _LLM_DUMP_COUNTER
+        _LLM_DUMP_COUNTER += 1
+        n = _LLM_DUMP_COUNTER
+        from pathlib import Path
+        dump_dir = Path(
+            os.environ.get("NANOBOT_DUMP_LLM_DIR")
+            or os.path.expanduser("~/.nanobot/workspace/_llm_dumps")
+        )
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        model = str(payload.get("model") or "unknown").replace("/", "__")
+        path = dump_dir / f"{n:05d}_{label}_{model}.json"
+        # Summary so a human can size things up without opening every file.
+        messages = payload.get("messages") or payload.get("input") or []
+        tools = payload.get("tools") or []
+        summary = {
+            "label": label,
+            "model": payload.get("model"),
+            "message_count": len(messages) if isinstance(messages, list) else None,
+            "tool_count": len(tools) if isinstance(tools, list) else None,
+            "approx_json_bytes": None,
+            "payload": payload,
+        }
+        # serialize once, then patch in the byte count
+        body = json.dumps(summary, indent=2, default=str, ensure_ascii=False)
+        summary["approx_json_bytes"] = len(body.encode("utf-8"))
+        path.write_text(
+            json.dumps(summary, indent=2, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        # Never let dump failures break the LLM call
+        logger.exception("LLM dump failed (continuing)")
+
+
 def _openai_compat_timeout_s() -> float:
     """Return the bounded request timeout used for OpenAI-compatible providers."""
     return _float_env("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", _OPENAI_COMPAT_REQUEST_TIMEOUT_S)
@@ -1456,6 +1507,7 @@ class OpenAICompatProvider(LLMProvider):
                         messages, tools, model, max_tokens, temperature,
                         reasoning_effort, tool_choice,
                     )
+                    _dump_llm_call(body, label="responses")
                     result = parse_response_output(await self._client.responses.create(**body))
                     self._record_responses_success(model, reasoning_effort)
                     return result
@@ -1475,6 +1527,7 @@ class OpenAICompatProvider(LLMProvider):
                 messages, tools, model, max_tokens, temperature,
                 reasoning_effort, tool_choice,
             )
+            _dump_llm_call(kwargs, label="chat")
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
             return self._handle_error(e, spec=self._spec, api_base=self.api_base)
@@ -1502,6 +1555,7 @@ class OpenAICompatProvider(LLMProvider):
                         reasoning_effort, tool_choice,
                     )
                     body["stream"] = True
+                    _dump_llm_call(body, label="responses_stream")
                     stream = await self._client.responses.create(**body)
 
                     async def _timed_stream():
@@ -1558,6 +1612,7 @@ class OpenAICompatProvider(LLMProvider):
                 kwargs.setdefault("extra_body", {})["tool_stream"] = True
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
+            _dump_llm_call(kwargs, label="chat_stream")
             stream = await self._client.chat.completions.create(**kwargs)
             chunks: list[Any] = []
             stream_iter = stream.__aiter__()
