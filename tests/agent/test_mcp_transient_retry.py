@@ -16,6 +16,7 @@ from nanobot.agent.tools.mcp import (
     _is_session_terminated,
     _is_transient,
 )
+from nanobot.agent.tools.registry import is_tool_error_result
 
 # ---------------------------------------------------------------------------
 # _is_transient helper
@@ -108,10 +109,16 @@ def test_is_session_terminated_recognizes_end_of_stream_by_type_name():
     assert _is_session_terminated(_EOS())
 
 
-def test_is_session_terminated_does_not_match_non_stream_transient():
-    """ConnectionResetError is still classified as plain-transient (not stream-dead),
-    so the wrapper's sleep+retry path is appropriate for it."""
-    assert not _is_session_terminated(ConnectionResetError("reset"))
+def test_is_session_terminated_matches_all_transient_exceptions():
+    """Upstream broadened _is_session_terminated to route every transient
+    exception (including ConnectionResetError) straight to reconnect rather
+    than the futile sleep-and-retry against a dead session."""
+    assert _is_session_terminated(ConnectionResetError("reset"))
+
+
+def test_is_session_terminated_ignores_unrelated_exception():
+    """A non-transient exception with no session-terminated marker stays False."""
+    assert not _is_session_terminated(ValueError("some unrelated error"))
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +171,7 @@ async def test_tool_fails_after_retry_exhausted():
 
     assert "failed after retry" in output
     assert "ClosedResourceError" in output
+    assert is_tool_error_result(wrapper.name, output)
     assert session.call_tool.call_count == 2
 
 
@@ -267,18 +275,10 @@ async def test_tool_retry_on_end_of_stream():
 
 
 @pytest.mark.asyncio
-async def test_tool_reconnects_when_transient_retry_reveals_terminated_session():
-    """Tool should reconnect if a stale session reports termination after transient retry.
-
-    Uses ConnectionResetError as the first error rather than ClosedResourceError —
-    ClosedResourceError is now classified as session-terminated (it means the anyio
-    stream is dead, so reconnect-before-retry is the right path; see
-    ``_STREAM_DEAD_EXC_NAMES``). ConnectionResetError is still a "real" transient.
-    """
+async def test_tool_reconnects_on_transient_failure():
+    """Tool should reconnect when a stale session reports a transient stream failure."""
     old_session = AsyncMock()
-    old_session.call_tool = AsyncMock(
-        side_effect=[ConnectionResetError("reset by peer"), _session_terminated_error()]
-    )
+    old_session.call_tool = AsyncMock(side_effect=_FakeClosedResourceError("closed"))
     new_session = AsyncMock()
     new_session.call_tool = AsyncMock(return_value=_make_tool_result("fresh"))
 
@@ -293,12 +293,13 @@ async def test_tool_reconnects_when_transient_retry_reveals_terminated_session()
 
     wrapper.set_reconnect_handler(reconnect)
 
-    with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock):
+    with patch("nanobot.agent.tools.mcp.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         output = await wrapper.execute(foo="bar")
 
     assert output == "fresh"
-    assert old_session.call_tool.call_count == 2
+    assert old_session.call_tool.call_count == 1
     assert new_session.call_tool.call_count == 1
+    mock_sleep.assert_not_called()
 
 
 @pytest.mark.asyncio
