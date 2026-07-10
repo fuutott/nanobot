@@ -23,7 +23,13 @@ from nanobot.bus.events import (
     RUNTIME_CONTROL_MCP_RELOAD,
     InboundMessage,
 )
-from nanobot.security.network import validate_url_target
+from nanobot.security.network import (
+    PinnedDNSAsyncTransport,
+    env_proxy_applies_to_url,
+    httpx_env_proxy_mounts,
+    resolve_url_target,
+    validate_url_target,
+)
 
 # Transient connection errors that warrant a single retry.
 # These typically happen when an MCP server restarts or a network
@@ -184,17 +190,24 @@ async def _probe_http_url(url: str, timeout: float = 3.0) -> bool:
     port = parsed.port
     if not port:
         port = 443 if parsed.scheme == "https" else 80
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=timeout,
-        )
-        writer.close()
-        with suppress(OSError, asyncio.TimeoutError):
-            await asyncio.wait_for(writer.wait_closed(), timeout=0.2)
-        return True
-    except (OSError, asyncio.TimeoutError):
+    ok, _, resolved_ips = resolve_url_target(url)
+    if not ok:
         return False
+    if env_proxy_applies_to_url(url):
+        return True
+    for target_host in resolved_ips or (host,):
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(target_host, port),
+                timeout=timeout,
+            )
+            writer.close()
+            with suppress(OSError, asyncio.TimeoutError):
+                await asyncio.wait_for(writer.wait_closed(), timeout=0.2)
+            return True
+        except (OSError, asyncio.TimeoutError):
+            continue
+    return False
 
 
 def _redact_url(url: str) -> str:
@@ -214,6 +227,14 @@ def _redact_url(url: str) -> str:
         return urllib.parse.urlunsplit((parts.scheme, netloc, path, "", ""))
     except Exception:
         return "<redacted-url>"
+
+
+def _pinned_transport_kwargs() -> dict[str, object]:
+    kwargs: dict[str, object] = {"transport": PinnedDNSAsyncTransport()}
+    mounts = httpx_env_proxy_mounts()
+    if mounts:
+        kwargs["mounts"] = mounts
+    return kwargs
 
 
 async def _validate_mcp_request_url(request: httpx.Request) -> None:
@@ -514,8 +535,6 @@ class MCPToolWrapper(_MCPWrapperBase):
                         f"(MCP tool returned malformed content: {type(exc).__name__})"
                     )
 
-        return "(MCP tool call failed)"  # Unreachable, but satisfies type checkers
-
     def _render_call_result(self, content: Any, arguments: Mapping[str, Any]) -> str:
         """Turn MCP content blocks into a tool result string.
 
@@ -667,8 +686,6 @@ class MCPResourceWrapper(_MCPWrapperBase):
                         parts.append(str(block))
                 return "\n".join(parts) or "(no output)"
 
-        return "(MCP resource read failed)"  # Unreachable
-
 
 class MCPPromptWrapper(_MCPWrapperBase):
     """Wraps an MCP prompt as a read-only nanobot Tool."""
@@ -802,8 +819,6 @@ class MCPPromptWrapper(_MCPWrapperBase):
                     else:
                         parts.append(str(content))
                 return "\n".join(parts) or "(no output)"
-
-        return "(MCP prompt call failed)"  # Unreachable
 
 
 async def _resolve_oauth_token(name: str, cfg) -> str | None:
@@ -980,6 +995,7 @@ async def connect_mcp_servers(
                         follow_redirects=True,
                         timeout=timeout,
                         auth=auth,
+                        **_pinned_transport_kwargs(),
                     )
 
                 read, write = await server_stack.enter_async_context(
@@ -997,6 +1013,7 @@ async def connect_mcp_servers(
                         event_hooks={"request": [_validate_mcp_request_url]},
                         follow_redirects=True,
                         timeout=httpx.Timeout(30.0, connect=10.0),
+                        **_pinned_transport_kwargs(),
                     )
                 )
                 read, write, _ = await server_stack.enter_async_context(
@@ -1221,17 +1238,14 @@ async def connect_missing_servers(state: Any, registry: ToolRegistry) -> None:
         connected = await connect_mcp_servers(missing_servers, registry)
         state._mcp_stacks.update(connected)
         _attach_reconnect_handlers(state, registry, connected)
-        state._mcp_connected = bool(state._mcp_stacks)
         if connected:
             logger.info("MCP connected servers: {}", sorted(connected))
         else:
             logger.warning("No MCP servers connected successfully (will retry next message)")
     except asyncio.CancelledError:
         logger.warning("MCP connection cancelled (will retry next message)")
-        state._mcp_connected = bool(state._mcp_stacks)
     except BaseException as e:
         logger.warning("Failed to connect MCP servers (will retry next message): {}", e)
-        state._mcp_connected = bool(state._mcp_stacks)
     finally:
         state._mcp_connecting = False
 
@@ -1283,7 +1297,6 @@ async def reload_servers(state: Any, registry: ToolRegistry) -> dict[str, Any]:
             state._mcp_stacks.update(connected)
             _attach_reconnect_handlers(state, registry, connected)
 
-        state._mcp_connected = bool(state._mcp_stacks)
         failed = sorted(set(to_connect) - set(connected))
         unchanged = not removed and not added and not changed and not retry_missing
         ok = not failed
@@ -1437,7 +1450,6 @@ async def _refresh_terminated_server(
         connected = await connect_mcp_servers({server_name: cfg}, registry)
         state._mcp_stacks.update(connected)
         _attach_reconnect_handlers(state, registry, connected)
-        state._mcp_connected = bool(state._mcp_stacks)
         if server_name not in connected:
             logger.warning("MCP server '{}' reconnect failed after session termination", server_name)
             return None
@@ -1473,7 +1485,6 @@ async def reload_single_server(
         connected = await connect_mcp_servers({server_name: cfg}, registry)
         state._mcp_stacks.update(connected)
         _attach_reconnect_handlers(state, registry, connected)
-        state._mcp_connected = bool(state._mcp_stacks)
         if server_name not in connected:
             logger.warning("MCP server '{}' reload failed", server_name)
             return False

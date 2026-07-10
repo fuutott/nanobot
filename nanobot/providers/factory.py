@@ -251,8 +251,6 @@ def provider_signature(
             fp.extra_body if fp else None,
             fp.api_type if fp else "auto",
             fp.extra_query if fp else None,
-            getattr(fp, "thinking_style", None) if fp else None,
-            getattr(fp, "strip_history_reasoning_content", False) if fp else False,
             getattr(fp, "region", None) if fp else None,
             getattr(fp, "profile", None) if fp else None,
             fallback.max_tokens,
@@ -260,13 +258,14 @@ def provider_signature(
             fallback.reasoning_effort,
             fallback.context_window_tokens,
             getattr(fp, "proxy", None) if fp else None,
+            getattr(fp, "thinking_style", None) if fp else None,
+            getattr(fp, "strip_history_reasoning_content", False) if fp else False,
         )
 
     provider_name = config.get_provider_name(resolved.model, preset=resolved)
     return (
         resolved.model,
         resolved.provider,
-        config.agents.defaults.default_text_provider,
         provider_name,
         config.get_api_key(resolved.model, preset=resolved),
         config.get_api_base(resolved.model, preset=resolved),
@@ -274,8 +273,6 @@ def provider_signature(
         p.extra_body if p else None,
         p.api_type if p else "auto",
         p.extra_query if p else None,
-        getattr(p, "thinking_style", None) if p else None,
-        getattr(p, "strip_history_reasoning_content", False) if p else False,
         getattr(p, "region", None) if p else None,
         getattr(p, "profile", None) if p else None,
         resolved.max_tokens,
@@ -283,6 +280,9 @@ def provider_signature(
         resolved.reasoning_effort,
         resolved.context_window_tokens,
         getattr(p, "proxy", None) if p else None,
+        config.agents.defaults.default_text_provider,
+        getattr(p, "thinking_style", None) if p else None,
+        getattr(p, "strip_history_reasoning_content", False) if p else False,
         tuple(_fallback_signature(fallback) for fallback in fallback_presets),
     )
 

@@ -13,9 +13,10 @@ WORKDIR /app
 
 # Install Python dependencies first (cached layer). Hatch reads the custom build
 # hook from hatch_build.py even for this metadata-only install.
+ARG NANOBOT_EXTRAS=discord
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 RUN mkdir -p nanobot && touch nanobot/__init__.py && \
-    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[discord]" && \
+    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
     rm -rf nanobot
 
 # Copy the full source and install
@@ -23,7 +24,7 @@ COPY nanobot/ nanobot/
 COPY plugins/ plugins/
 # In-tree gateway webui is intentionally absent (no nanobot/web/dist/) —
 # the nanobot-channel-webui plugin provides the UI on port 18792.
-RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[discord]" && \
+RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
         uv pip install --system --no-cache \
             /app/plugins/nanobot-channel-webui \
             /app/plugins/nanobot-channel-openaiapi \
