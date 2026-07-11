@@ -235,14 +235,26 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 
 Always test with `uv run pytest tests/`. Discord tests are skipped unless `discord.py` is installed (`pip install nanobot-ai[discord]`).
 
-### Windows host hangs the full suite — run in the container instead
+### Prefer host runs; the container is a last resort, not the default
 
-`uv run pytest tests/` on the Windows host hangs after specific tests (e.g. `tests/cli/test_restart_command.py::test_status_intercepted_in_run_loop`). The tests themselves PASS — pytest then wedges on async teardown because Windows' ProactorEventLoop leaves leaked tasks dangling. Subsequent tests in the same session never start. Each subdirectory run in isolation passes fine, but the full-suite run never completes.
+Verify on the Windows host. Run the suites that touch your change plus a broad
+sweep (`uv run pytest tests/agent tests/providers tests/tools tests/config`) —
+these complete fine on the host. **Then read every failure.** Windows-only
+failures are recognizable and expected: PowerShell writes UTF-16-BOM instead of
+POSIX output (upstream defaults Windows `exec` to PowerShell), and git autocrlf
+produces phantom diffs. If the failing tests are upstream's new tests and the
+cause is a Windows shell/git artifact, they cannot fail on Linux for a
+merge-related reason — a container run proves nothing new. Don't do it.
 
-**Workaround**: run the suite inside the Docker container after `./redo.ps1`:
+**The narrow case for the container**: only the *whole-tree* `uv run pytest
+tests/` run hangs on the Windows host — pytest wedges on async teardown after
+certain tests (e.g. `tests/cli/test_restart_command.py::test_status_intercepted_in_run_loop`)
+because Windows' ProactorEventLoop leaks dangling tasks; the tests themselves
+PASS. Subdirectory runs are fine. So reach for the container ONLY when you
+genuinely need a single whole-tree pass AND a failure's cause is truly
+ambiguous — not as routine post-merge verification.
 
-```powershell
-docker compose exec nanobot uv run pytest tests/
-```
-
-Linux event-loop teardown does not have this issue, so the container run mirrors CI exactly. Use this whenever you need a full-suite verification before pushing.
+Note `tests/` is **not** in the image (the Dockerfile copies only `nanobot/` +
+`plugins/`), so a container test run needs a repo bind-mount, `uv run --with
+pytest ...`, and non-root workarounds. That friction is the tell that you've
+left the fast path — usually the host evidence already answers the question.
