@@ -181,6 +181,20 @@ def _advance_dream_cursor_if_behind(memory: Any) -> None:
         memory.set_last_dream_cursor(latest)
 
 
+def _commit_dream_changes(memory: Any) -> str | None:
+    """Commit durable Dream edits, without entering the commit path for a no-op run."""
+    if not memory.git.is_initialized():
+        return None
+    diff_body = memory.dream_content_diff()
+    if not diff_body:
+        return None
+    message = memory.build_dream_commit_message(
+        "dream: periodic memory consolidation",
+        diff_body,
+    )
+    return memory.git.auto_commit(message)
+
+
 class SafeFileHistory(FileHistory):
     """FileHistory subclass that sanitizes surrogate characters on write.
 
@@ -311,7 +325,16 @@ def _build_cli_key_bindings() -> KeyBindings:
                        single-line Enter-to-send feel even though the buffer
                        is multiline-capable).
       * Alt+Enter   -> insert a newline for multi-line input.
+      * Shift+Enter -> insert a newline on terminals that emit the CSI-u
+                       (kitty / fixterms) keyboard-protocol encoding for it.
     """
+    # prompt_toolkit does not recognize CSI-u, so register its Shift+Enter
+    # sequence as a best-effort addition without overriding existing mappings.
+    with suppress(Exception):
+        from prompt_toolkit.input import ansi_escape_sequences as _aes
+
+        _aes.ANSI_SEQUENCES.setdefault("\x1b[13;2u", Keys.ControlF3)
+
     kb = KeyBindings()
 
     @kb.add("enter")
@@ -324,6 +347,10 @@ def _build_cli_key_bindings() -> KeyBindings:
 
     # LF-as-Enter terminals send Alt+Enter as ESC + LF rather than ESC + CR.
     @kb.add("escape", Keys.ControlJ)  # Alt+Enter on LF-as-Enter terminals
+    def _(event):
+        event.current_buffer.insert_text("\n")
+
+    @kb.add(Keys.ControlF3)  # Shift+Enter on CSI-u capable terminals
     def _(event):
         event.current_buffer.insert_text("\n")
 
@@ -1495,7 +1522,6 @@ def _run_gateway(
             from nanobot.agent.memory import MemoryStore
 
             dream_session_key = MemoryStore.dream_session_key
-            build_dream_commit_message = MemoryStore.build_dream_commit_message
             prune_dream_sessions = MemoryStore.prune_dream_sessions
 
             store = agent.context.memory
@@ -1544,13 +1570,9 @@ def _run_gateway(
                     source="dream",
                     timezone_name=config.agents.defaults.timezone,
                 )
-                if store.git.is_initialized():
-                    msg = build_dream_commit_message(
-                        "dream: periodic memory consolidation", diff_body,
-                    )
-                    sha = store.git.auto_commit(msg)
-                    if sha:
-                        logger.info("Dream commit: {}", sha)
+                sha = _commit_dream_changes(store)
+                if sha:
+                    logger.info("Dream commit: {}", sha)
                 store.compact_history()
                 prune_dream_sessions(agent.sessions.sessions_dir)
             return None
