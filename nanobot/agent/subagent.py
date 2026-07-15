@@ -538,10 +538,8 @@ class SubagentManager:
         ``[]`` includes no skills at all (useful for tight token budgets).
         A non-empty list includes only the named skills.
         """
-        from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
-        time_ctx = ContextBuilder._build_runtime_context(None, None)
         root = workspace or self.workspace
         loader = SkillsLoader(root, disabled_skills=self.disabled_skills)
         if skills_filter is None:
@@ -555,7 +553,6 @@ class SubagentManager:
             skills_summary = loader.build_skills_summary(exclude=all_names - allowed)
         return render_template(
             "agent/subagent_system.md",
-            time_ctx=time_ctx,
             workspace=str(root),
             skills_summary=skills_summary or "",
         )

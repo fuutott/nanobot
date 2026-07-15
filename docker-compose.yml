@@ -25,10 +25,14 @@ services:
     command: ["gateway"]
     restart: unless-stopped
     ports:
+<<<<<<< HEAD
       - 18790:18790
       - 18791:18791
       - 18792:18792
       - 18793:18793
+=======
+      - 127.0.0.1:18790:18790
+>>>>>>> upstream/main
       - 8765:8765
     deploy:
       resources:

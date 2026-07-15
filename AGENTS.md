@@ -50,7 +50,7 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 - **Command Router** (`nanobot/command/`): Slash command routing and built-in command handlers.
 - **Heartbeat** (`nanobot/templates/HEARTBEAT.md`): Periodic task list checked via `cron` jobs (legacy dedicated service removed).
 - **Pairing** (`nanobot/pairing/`): DM sender approval store with persistent pairing codes per channel.
-- **Skills** (`nanobot/skills/`): Built-in skill definitions (long-goal, cron, github, image-generation, etc.) loaded into agent context.
+- **Skills** (`nanobot/skills/`): Built-in skill definitions (cron, github, image-generation, etc.) loaded into agent context.
 - **Security** (`nanobot/security/`): PTH file guard and other security measures activated at CLI entry.
 
 ### Entry Points
@@ -103,7 +103,7 @@ These wrap upstream's in-tree implementations as separately installable channels
 
 ### MCP OAuth 2.1 (`agent/tools/oauth_flow.py`, `oauth_tokens.py`, `agent/loop.py`)
 
-Talk to OAuth-protected remote MCP servers. Device-flow + dynamic client registration. `MCPConnection` class wraps each server with epoch-based reconnect-if-stale. `_oauth_refresh_loop` refreshes tokens before expiry. CLI command: `nanobot mcp-auth <server-name>`.
+Talk to OAuth-protected remote MCP servers. Device-flow + dynamic client registration. `_resolve_oauth_token` injects `Authorization: Bearer …` at the top of upstream's `connect_single_server`, so it re-resolves on every reconnect (refresh-token rotation happens for free). `_oauth_refresh_loop` refreshes tokens before expiry. CLI command: `nanobot mcp-auth <server-name>`.
 
 ### Per-subagent provider/model override (`agent/tools/spawn.py`)
 
@@ -193,7 +193,7 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 |------|-------------|-----|
 | `agent/tools/oauth_flow.py`, `oauth_tokens.py` | Entire files (upstream-untouched) | OAuth device-flow + dynamic client registration + token storage |
 | `agent/tools/mcp.py` | `_resolve_oauth_token` function + call site at top of upstream's `connect_single_server` that injects `Authorization: Bearer …` into HTTP transport headers | Talk to OAuth 2.1 remote MCP servers. Token re-resolves on every reconnect because upstream's `_refresh_terminated_server` calls `connect_single_server` again — refresh-token rotation happens for free. |
-| `agent/loop.py` | `_mcp_owner` task wrapping `_connect_mcp()` + `_start_oauth_refresh_task` + `_oauth_refresh_loop` | Isolate anyio cancel scopes from `run()`; refresh OAuth tokens before expiry |
+| `agent/loop.py` | `_start_oauth_refresh_task` + `_oauth_refresh_loop` | Refresh OAuth tokens before expiry |
 | `cli/commands.py` | `mcp-auth` Typer command (~230 lines at end of file) + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers | Interactive OAuth setup for remote MCP servers |
 | `config/schema.py` | `OAuthConfig` class + `MCPServerConfig.auth` field | Wire OAuth into MCP server config |
 
@@ -230,6 +230,7 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 - **Discord `group_policy="mention"` default** — used to be our fork's hard requirement; became the upstream default in v0.2.x. Nothing to preserve.
 - **`dream.interval_h=8` default** — dropped after upstream's Dream refactor (`d1a94dae` replaced two-phase Dream with simple cron + `process_direct`). Runtime config also reverted to upstream's 2h default; `maxBatchSize` and `maxIterations` are now deprecated fields.
 - **`MCPConnection` class + epoch-based reconnect** — dropped after upstream's `e9145b7a` / `d0eba7cd` added `_MCPWrapperBase` with `_refresh_session_after_termination` + `_attach_reconnect_handlers` + state-level `_reload_lock`. Upstream's coarser state-lock equivalently protects against thundering herd, and on session-terminated errors it tears down + rebuilds the whole server, swapping the live session into each wrapper. Only the OAuth token resolution remained local (now injected at the top of upstream's `connect_single_server`). `tests/agent/test_mcp_reconnect.py` deleted (its subject no longer exists).
+- **`_mcp_owner` task + `_mcp_shutdown_event`** — dropped after upstream's `edf78e70` added `_OwnedMCPConnection` + a per-server `mcp:{name}` owner task inside `connect_single_server`. Our single loop-level owner task existed to keep anyio cancel scopes off `run()`; upstream now does the same thing per-connection (each task opens its stack, waits on `close_requested`, closes in its own `finally`), which is strictly finer-grained — one failing server can't disturb the others, and reconnect/hot-reload close independently. `run()` now just `await self._connect_mcp()` and `close_mcp()` just delegates to `agent_context.close_mcp`. `_start_oauth_refresh_task` / `_oauth_refresh_loop` remain local.
 
 ## Local testing
 
