@@ -94,12 +94,21 @@ The rest of this file is specific to this personal fork. Upstream contributors c
 
 ### Plugin Channels (`plugins/`)
 
-Three optional packages installable as separate Python packages:
+Three fork-authored `BaseChannel` subclasses shipped as separate Python packages:
 - `nanobot-channel-webui` — Browser UI (ships its own prebuilt webui dist)
 - `nanobot-channel-openaiapi` — HTTP API endpoint
 - `nanobot-channel-mcpserver` — MCP server integration
 
-These wrap upstream's in-tree implementations as separately installable channels so the Docker image can compose them cleanly. The Dockerfile sets `NANOBOT_SKIP_WEBUI_BUILD=1` to skip upstream's hatch webui build (the plugin already has its own dist).
+The Dockerfile sets `NANOBOT_SKIP_WEBUI_BUILD=1` to skip upstream's hatch webui build (the webui plugin already has its own dist).
+
+**Discovery (post-`462a0dfb`):** upstream retired the `nanobot.channels` entry-point group these plugins used, in favour of self-contained in-tree channel packages (`nanobot/channels/<name>/manifest.py` exporting `PLUGIN = ChannelPlugin(...)`). `load_channel_package` requires the manifest's `runtime=` target to physically live inside `nanobot/channels/<name>/`. So each plugin now has a thin in-tree shim:
+- `nanobot/channels/<name>/__init__.py`
+- `nanobot/channels/<name>/manifest.py` — `PLUGIN` with `runtime=f"{__package__}.runtime:<Class>"`, `setup=ChannelSetupSpec(fields={})` (configured via config.json, not the wizard), `settings_visible=False`
+- `nanobot/channels/<name>/runtime.py` — re-exports the class from the installed plugin package (`from nanobot_channel_webui.channel import WebUIChannel`), satisfying the in-package check while keeping the plugin (and its dist) as the source of truth
+
+The plugins' own `[project.entry-points."nanobot.channels"]` declarations were removed (the group is dead; discovery is via the in-tree manifests). `tests/channels/test_channel_setup.py::EXPECTED_CHANNELS` includes the 3 fork channels.
+
+**Channel deps at build:** upstream also moved per-channel dependencies out of pyproject extras into each channel's `manifest.py` (`dependencies=`) with a runtime pip auto-installer that can't run in our non-root/offline container. The Dockerfile's `ARG NANOBOT_CHANNEL_DEPS` bakes the enabled channels' deps (discord.py, python-telegram-bot, socks) at build — **keep it in sync with the enabled channels' manifest `dependencies=`** or the channel silently fails to load.
 
 ### MCP OAuth 2.1 (`agent/tools/oauth_flow.py`, `oauth_tokens.py`, `agent/loop.py`)
 

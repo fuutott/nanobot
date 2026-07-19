@@ -9,8 +9,8 @@ dependencies = [
     "uvicorn>=0.42.0,<1.0.0",
 ]
 
-[project.entry-points."nanobot.channels"]
-mcpserver = "nanobot_channel_mcpserver:MCPServerChannel"
+# Discovery is via the in-tree manifest nanobot/channels/mcpserver/manifest.py
+# (upstream 462a0dfb retired the "nanobot.channels" entry-point group).
 
 [build-system]
 requires = ["hatchling"]

@@ -31,6 +31,12 @@ EXPECTED_CHANNELS = {
     "wecom",
     "weixin",
     "whatsapp",
+    # Fork channels: in-tree manifest shims that re-export the
+    # nanobot-channel-{webui,openaiapi,mcpserver} plugin runtimes so they are
+    # discoverable under upstream's self-contained channel model.
+    "webui",
+    "openaiapi",
+    "mcpserver",
 }
 
 

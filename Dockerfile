@@ -13,10 +13,16 @@ WORKDIR /app
 
 # Install Python dependencies first (cached layer). Hatch reads the custom build
 # hook from hatch_build.py even for this metadata-only install.
-ARG NANOBOT_EXTRAS=discord,telegram
+#
+# Built-in channel deps: upstream's 462a0dfb moved per-channel dependencies out
+# of pyproject extras into each channel's manifest.py, with a runtime pip
+# auto-installer that CANNOT work in our non-root/offline container. So we bake
+# the deps for the channels we enable (discord, telegram) directly at build.
+# Keep this list in sync with the enabled channels' manifest `dependencies=`.
+ARG NANOBOT_CHANNEL_DEPS="discord.py>=2.5.2,<3.0.0 python-telegram-bot[socks,webhooks]>=22.6,<23.0 socksio>=1.0.0,<2.0.0 python-socks[asyncio]>=2.8.0,<3.0.0"
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 RUN mkdir -p nanobot && touch nanobot/__init__.py && \
-    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
+    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache "." $NANOBOT_CHANNEL_DEPS && \
     rm -rf nanobot
 
 # Copy the full source and install
@@ -24,7 +30,7 @@ COPY nanobot/ nanobot/
 COPY plugins/ plugins/
 # In-tree gateway webui is intentionally absent (no nanobot/web/dist/) —
 # the nanobot-channel-webui plugin provides the UI on port 18792.
-RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
+RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache "." $NANOBOT_CHANNEL_DEPS && \
         uv pip install --system --no-cache \
             /app/plugins/nanobot-channel-webui \
             /app/plugins/nanobot-channel-openaiapi \
