@@ -62,6 +62,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Fork: upstream's 462a0dfb moved per-channel deps out of extras into each
+# channel's manifest.py (`dependencies=`) with a runtime pip auto-installer. We
+# re-add the channel extras so `uv tool install "git+...@main[discord,telegram]"`
+# and the Docker build install them at build time (the runtime installer can't
+# run in a non-root/offline container). Keep these in sync with the channels'
+# manifest `dependencies=` (nanobot/channels/<name>/manifest.py).
+discord = [
+    "discord.py>=2.5.2,<3.0.0",
+]
+telegram = [
+    "python-telegram-bot[socks,webhooks]>=22.6,<23.0",
+    "socksio>=1.0.0,<2.0.0",
+    "python-socks[asyncio]>=2.8.0,<3.0.0; sys_platform != 'win32'",
+]
 api = [
     "aiohttp>=3.9.0,<4.0.0",
 ]
