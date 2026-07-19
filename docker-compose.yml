@@ -7,6 +7,9 @@ x-common-config: &common-config
     - ~/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit
   cap_drop:
     - ALL
+  # Fork: SYS_ADMIN + unconfined apparmor/seccomp are required for the
+  # bubblewrap exec sandbox. Upstream's b76d54aa hardened its default compose by
+  # dropping these; we keep them because our deployment uses the sandbox.
   cap_add:
     - SYS_ADMIN
   security_opt:
@@ -25,14 +28,13 @@ services:
     command: ["gateway"]
     restart: unless-stopped
     ports:
-<<<<<<< HEAD
+      # Fork: expose all plugin channel ports on all interfaces — the WebUI
+      # (18792) and other plugins are reached over LAN/Tailscale (see the
+      # user's webui allowedOrigins). Upstream now binds 127.0.0.1:18790 only.
       - 18790:18790
       - 18791:18791
       - 18792:18792
       - 18793:18793
-=======
-      - 127.0.0.1:18790:18790
->>>>>>> upstream/main
       - 8765:8765
     deploy:
       resources:

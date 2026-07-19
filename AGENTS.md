@@ -40,7 +40,7 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 
 - **Agent Loop** (`nanobot/agent/loop.py`, `runner.py`): The core processing engine. `AgentLoop` manages session keys, hooks, and context building. `AgentRunner` executes the multi-turn LLM conversation with tool execution.
 - **LLM Providers** (`nanobot/providers/`): Provider implementations (Anthropic, OpenAI-compatible, OpenAI Responses API, Azure, Bedrock, GitHub Copilot, OpenAI Codex, etc.) built on a common base (`base.py`). Includes image generation (`image_generation.py`) and audio transcription (`transcription.py`). `factory.py` and `registry.py` handle instantiation and model discovery.
-- **Channels** (`nanobot/channels/`): Platform integrations (Telegram, Discord, Slack, Feishu, Matrix, WhatsApp, QQ, WeChat, WeCom, DingTalk, Email, MoChat, MS Teams, WebSocket, Mattermost). `manager.py` discovers and coordinates them. Channels are auto-discovered via `pkgutil` scan + entry-point plugins.
+- **Channels** (`nanobot/channels/`): Platform integrations (Telegram, Discord, Slack, Feishu, Matrix, WhatsApp, QQ, WeChat, WeCom, DingTalk, Email, MoChat, MS Teams, WebSocket, Mattermost). `manager.py` discovers and coordinates them. Channels are self-contained packages auto-discovered via `pkgutil` scanning.
 - **Tools** (`nanobot/agent/tools/`): Agent capabilities exposed to the LLM: filesystem (read/write/edit/list), shell execution (with sandbox backends), web search/fetch, MCP servers, cron, notebook editing, subagent spawning, long-running tasks / sustained goals (`long_task.py`), image generation, and self-modification. Tools are auto-discovered via `pkgutil` scan + entry-point plugins.
 - **Memory** (`nanobot/agent/memory.py`): Session history persistence with Dream two-phase memory consolidation. Uses atomic writes with fsync for durability.
 - **Session Management** (`nanobot/session/`): Per-session history, context compaction, TTL-based auto-compaction (`manager.py`), and sustained goal state tracking (`goal_state.py`).
@@ -111,9 +111,10 @@ Agent can pass `provider=` and `model=` when calling `spawn`. Defaults inherit f
 
 ### Docker deployment shape
 
-- Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` with Node.js 20, git, curl, bubblewrap
-- Runs as non-root user `nanobottie`
-- Exposed ports: **18790** (gateway), **18791** (openaiapi plugin), **18792** (webui plugin), **18793** (mcpserver plugin), 8765 (optional websocket channel)
+- Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` with git, bubblewrap, libmagic1, tmux/procps/iputils/dnsutils (no Node.js — the webui plugin ships its own prebuilt dist)
+- Runs as non-root user `nanobottie` (upstream renamed its user to `nanobot` + root/setpriv drop for Render in `462a0dfb`/`c7737909`; we keep `nanobottie` + direct `USER`, and upstream's entrypoint takes its "already non-root" branch for us)
+- Built-in channel extras: `ARG NANOBOT_EXTRAS=discord,telegram` — telegram is an optional extra upstream (`.[telegram]`), so it MUST be listed here or the channel silently fails to load with `No module named 'telegram'`
+- Exposed ports: **18790** (gateway), **18791** (openaiapi plugin), **18792** (webui plugin), **18793** (mcpserver plugin), 8765 (optional websocket channel) — all on all interfaces for LAN/Tailscale access (upstream now binds `127.0.0.1:18790` only)
 - Resource limits in `docker-compose.yml`: 1 CPU / 1 GB memory per service
 - Rebuild via `./redo.ps1` — wraps `docker compose build && docker compose up -d`
 

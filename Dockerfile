@@ -13,7 +13,7 @@ WORKDIR /app
 
 # Install Python dependencies first (cached layer). Hatch reads the custom build
 # hook from hatch_build.py even for this metadata-only install.
-ARG NANOBOT_EXTRAS=discord
+ARG NANOBOT_EXTRAS=discord,telegram
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 RUN mkdir -p nanobot && touch nanobot/__init__.py && \
     NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
@@ -30,6 +30,12 @@ RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EX
             /app/plugins/nanobot-channel-openaiapi \
             /app/plugins/nanobot-channel-mcpserver
 
+# Render deploy template (see render.yaml): committed gateway config that wires
+# secrets through ${ANTHROPIC_API_KEY} / ${NANOBOT_WEB_TOKEN} env vars (resolved
+# at startup). Lives in the code dir (/app), not the data dir, so a mounted disk
+# won't shadow it. Only used when RENDER=true; ignored by local runs.
+COPY render-config.json ./
+
 # Create non-root user and config directory
 RUN useradd -m -u 1000 -s /bin/bash nanobottie && \
     mkdir -p /home/nanobottie/.nanobot && \
@@ -38,8 +44,16 @@ RUN useradd -m -u 1000 -s /bin/bash nanobottie && \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 
+# Fork: we run the local docker-compose deployment directly as the non-root
+# nanobottie user (our compose mounts ~/.nanobot to /home/nanobottie/.nanobot).
+# Upstream's entrypoint still handles the Render root+setpriv path when RENDER=
+# true and the container starts as root; here it takes the "already non-root"
+# branch. See entrypoint.sh.
 USER nanobottie
 ENV HOME=/home/nanobottie
+# Ensure crash output reaches container logs (app output is otherwise swallowed
+# on non-graceful exit).
+ENV PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1
 
 # Gateway default port + plugin channel ports + optional WebSocket channel port
 EXPOSE 18790 18791 18792 18793 8765
