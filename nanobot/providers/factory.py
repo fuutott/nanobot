@@ -18,6 +18,7 @@ class ProviderSnapshot:
     context_window_tokens: int
     signature: tuple[object, ...]
     generation: GenerationSettings | None = None
+    model_preset: str | None = None
 
 
 def _resolve_model_preset(
@@ -54,7 +55,6 @@ def _make_provider_core(
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     model = model or resolved.model
-
     defaults = config.agents.defaults
     forced_text_provider = (defaults.default_text_provider or "").strip()
     if forced_text_provider:
@@ -75,6 +75,7 @@ def _make_provider_core(
                 raise ValueError(f"Provider '{provider_name}' requires api_base in config.")
             spec = create_dynamic_spec(
                 provider_name,
+                display_name=(p.display_name or "") if p else "",
                 thinking_style=(p.thinking_style or "") if p else "",
                 strip_history_reasoning_content=bool(
                     getattr(p, "strip_history_reasoning_content", False)
@@ -83,10 +84,10 @@ def _make_provider_core(
     if spec and spec.is_transcription_only:
         raise ValueError(f"Provider '{provider_name}' only supports transcription.")
     backend = spec.backend if spec else "openai_compat"
-    if p and p.proxy and backend not in {"openai_compat", "openai_codex"}:
+    if p and p.proxy and backend not in {"openai_compat", "openai_codex", "xai_grok"}:
         raise ValueError(
             f"providers.{provider_name}.proxy is only supported for "
-            "OpenAI-compatible providers and OpenAI Codex."
+            "OpenAI-compatible providers, OpenAI Codex, and xAI Grok."
         )
 
     api_base = p.api_base if p and p.api_base else None
@@ -118,6 +119,15 @@ def _make_provider_core(
         provider = OpenAICodexProvider(
             default_model=model,
             proxy=getattr(p, "proxy", None) if p else None,
+            extra_body=p.extra_body if p else None,
+        )
+    elif backend == "xai_grok":
+        from nanobot.providers.xai_grok_provider import XAIGrokProvider
+
+        provider = XAIGrokProvider(
+            default_model=model,
+            proxy=getattr(p, "proxy", None) if p else None,
+            extra_body=p.extra_body if p else None,
         )
     elif backend == "azure_openai":
         from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
@@ -228,6 +238,22 @@ def make_provider(
     return provider
 
 
+def build_unconfigured_provider_snapshot(config: Config, setup_error: str) -> ProviderSnapshot:
+    """Build a non-networking runtime so the WebUI can collect first-time setup."""
+    from nanobot.providers.unconfigured_provider import UnconfiguredProvider
+
+    preset = config.resolve_preset()
+    provider = UnconfiguredProvider(preset.model)
+    provider.generation = preset.to_generation_settings()
+    return ProviderSnapshot(
+        provider=provider,
+        model=preset.model,
+        context_window_tokens=preset.context_window_tokens,
+        signature=("unconfigured", setup_error, preset.model),
+        generation=provider.generation,
+    )
+
+
 def provider_signature(
     config: Config,
     *,
@@ -259,7 +285,7 @@ def provider_signature(
             fallback.reasoning_effort,
             fallback.context_window_tokens,
             getattr(fp, "proxy", None) if fp else None,
-            getattr(fp, "thinking_style", None) if fp else None,
+            fp.thinking_style if fp else None,
             getattr(fp, "strip_history_reasoning_content", False) if fp else False,
         )
 
@@ -282,7 +308,7 @@ def provider_signature(
         resolved.context_window_tokens,
         getattr(p, "proxy", None) if p else None,
         config.agents.defaults.default_text_provider,
-        getattr(p, "thinking_style", None) if p else None,
+        p.thinking_style if p else None,
         getattr(p, "strip_history_reasoning_content", False) if p else False,
         tuple(_fallback_signature(fallback) for fallback in fallback_presets),
     )
@@ -295,6 +321,11 @@ def build_provider_snapshot(
     preset: ModelPresetConfig | None = None,
 ) -> ProviderSnapshot:
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
+    selected_preset = (
+        config.agents.defaults.model_preset
+        if preset_name is None and preset is None
+        else preset_name
+    )
     fallback_windows = [
         fallback.context_window_tokens
         for fallback in _resolve_fallback_presets(config, resolved)
@@ -305,6 +336,7 @@ def build_provider_snapshot(
         context_window_tokens=min([resolved.context_window_tokens, *fallback_windows]),
         signature=provider_signature(config, preset=resolved),
         generation=resolved.to_generation_settings(),
+        model_preset=selected_preset,
     )
 
 

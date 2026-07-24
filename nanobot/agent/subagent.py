@@ -13,6 +13,7 @@ from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
@@ -153,7 +154,7 @@ class SubagentManager:
         # Surfaced through MyTool so the agent can discover what it can pass to spawn.
         self.available_providers = list(available_providers or [])
         self.available_models = list(available_models or [])
-        self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -345,6 +346,103 @@ class SubagentManager:
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
+    async def run_inline(
+        self,
+        task: str,
+        label: str | None = None,
+        origin_channel: str = "cli",
+        origin_chat_id: str = "direct",
+        session_key: str | None = None,
+        origin_message_id: str | None = None,
+        temperature: float | None = None,
+        workspace_scope: WorkspaceScope | None = None,
+        *,
+        runtime: LLMRuntime | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        skills: list[str] | None = None,
+    ) -> str:
+        """Run a subagent synchronously and return its result to the caller.
+
+        Accepts the same per-spawn overrides as ``spawn`` (provider/model,
+        system_prompt, tools, skills) so a blocking consultation can also run on
+        a cheaper model or with a trimmed tool/skill surface.
+        """
+        if (provider or model) and self._provider_factory is None:
+            return ToolResult.error(
+                "Cannot run inline subagent with provider/model override: "
+                "no provider_factory configured."
+            )
+        if provider and self.available_providers and provider not in self.available_providers:
+            return ToolResult.error(
+                f"Cannot run inline subagent: unknown provider '{provider}'. "
+                f"Available: {', '.join(self.available_providers) or '(none)'}."
+            )
+
+        if runtime is None:
+            runtime = self._compat_spawn_runtime()
+        if (provider or model) and self._provider_factory is not None:
+            ephemeral_provider, ephemeral_model = self._provider_factory(provider, model)
+            runtime = LLMRuntime.capture(
+                ephemeral_provider,
+                ephemeral_model,
+                context_window_tokens=runtime.context_window_tokens,
+            )
+            logger.info(
+                "Inline subagent using override: provider={} model={}",
+                provider or "(inherited)", ephemeral_model,
+            )
+        if temperature is not None:
+            runtime = runtime.with_generation_overrides(temperature=temperature)
+        task_id = str(uuid.uuid4())[:8]
+        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
+        origin = {
+            "channel": origin_channel,
+            "chat_id": origin_chat_id,
+            "session_key": session_key,
+        }
+        status = SubagentStatus(
+            task_id=task_id,
+            label=display_label,
+            task_description=task,
+            started_at=time.monotonic(),
+        )
+        self._task_statuses[task_id] = status
+        logger.info("Running inline subagent [{}]: {}", task_id, display_label)
+        inline_task = asyncio.create_task(
+            self._run_subagent(
+                task_id,
+                task,
+                display_label,
+                origin,
+                status,
+                runtime,
+                origin_message_id,
+                workspace_scope,
+                system_prompt,
+                tools,
+                skills,
+                announce=False,
+            )
+        )
+        self._running_tasks[task_id] = inline_task
+        if session_key:
+            self._session_tasks.setdefault(session_key, set()).add(task_id)
+        try:
+            result = await inline_task
+            if status.phase == "error" or status.stop_reason in {"error", "tool_error"}:
+                return ToolResult.error(result)
+            return result
+        finally:
+            self._running_tasks.pop(task_id, None)
+            self._task_statuses.pop(task_id, None)
+            if session_key and (ids := self._session_tasks.get(session_key)):
+                ids.discard(task_id)
+                if not ids:
+                    del self._session_tasks[session_key]
+
     async def _run_subagent(
         self,
         task_id: str,
@@ -358,7 +456,9 @@ class SubagentManager:
         system_prompt_override: str | None = None,
         tools_filter: list[str] | None = None,
         skills_filter: list[str] | None = None,
-    ) -> None:
+        *,
+        announce: bool = True,
+    ) -> str:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
@@ -378,9 +478,8 @@ class SubagentManager:
                     "Subagent [{}] tool whitelist: {}",
                     task_id, sorted(allowed_tools),
                 )
-            tools = self._build_tools(
-                workspace=root, tools_config=cfg, allowed_tools=allowed_tools,
-            )
+            # Construct from the agent workspace; the bound scope below supplies the project cwd.
+            tools = self._build_tools(tools_config=cfg, allowed_tools=allowed_tools)
             if system_prompt_override is not None:
                 system_prompt = system_prompt_override
                 logger.info(
@@ -441,27 +540,43 @@ class SubagentManager:
 
             if result.stop_reason == "tool_error":
                 status.tool_events = list(result.tool_events)
-                await self._announce_result(
-                    task_id, label, task,
-                    self._format_partial_progress(result),
-                    origin, "error", origin_message_id,
-                )
+                final_result = self._format_partial_progress(result)
+                final_status = "error"
             elif result.stop_reason == "error":
-                await self._announce_result(
-                    task_id, label, task,
-                    result.error or "Error: subagent execution failed.",
-                    origin, "error", origin_message_id,
-                )
+                final_result = result.error or "Error: subagent execution failed."
+                final_status = "error"
             else:
                 final_result = result.final_content or "Task completed but no final response was generated."
+                final_status = "ok"
                 logger.info("Subagent [{}] completed successfully", task_id)
-                await self._announce_result(task_id, label, task, final_result, origin, "ok", origin_message_id)
+            if announce:
+                await self._announce_result(
+                    task_id,
+                    label,
+                    task,
+                    final_result,
+                    origin,
+                    final_status,
+                    origin_message_id,
+                )
+            return final_result
 
         except Exception as e:
             status.phase = "error"
             status.error = str(e)
             logger.exception("Subagent [{}] failed", task_id)
-            await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error", origin_message_id)
+            final_result = f"Error: {e}"
+            if announce:
+                await self._announce_result(
+                    task_id,
+                    label,
+                    task,
+                    final_result,
+                    origin,
+                    "error",
+                    origin_message_id,
+                )
+            return final_result
 
     async def _announce_result(
         self,
@@ -543,8 +658,9 @@ class SubagentManager:
         """
         from nanobot.agent.skills import SkillsLoader
 
-        root = workspace or self.workspace
-        loader = SkillsLoader(root, disabled_skills=self.disabled_skills)
+        agent_workspace = self.workspace.expanduser().resolve()
+        project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
+        loader = SkillsLoader(self.workspace, disabled_skills=self.disabled_skills)
         if skills_filter is None:
             skills_summary = loader.build_skills_summary()
         elif not skills_filter:
@@ -556,7 +672,9 @@ class SubagentManager:
             skills_summary = loader.build_skills_summary(exclude=all_names - allowed)
         return render_template(
             "agent/subagent_system.md",
-            workspace=str(root),
+            workspace=str(project_workspace),
+            agent_workspace=str(agent_workspace),
+            history_log=str(agent_workspace / "memory" / "history.jsonl"),
             skills_summary=skills_summary or "",
         )
 
@@ -568,7 +686,17 @@ class SubagentManager:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._exec_session_manager.terminate_by_owner(session_key)
         return len(tasks)
+
+    async def close(self) -> None:
+        """Cancel running subagents and close their shared exec sessions."""
+        tasks = [task for task in self._running_tasks.values() if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._exec_session_manager.close_all()
 
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""

@@ -11,30 +11,44 @@ RUN apt-get update && \
 
 WORKDIR /app
 
+# Keep the runtime environment writable by the non-root nanobot user. Enabled
+# channels may install their manifest-declared dependencies at startup.
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
+RUN uv venv --seed "$VIRTUAL_ENV"
+
 # Install Python dependencies first (cached layer). Hatch reads the custom build
 # hook from hatch_build.py even for this metadata-only install.
 #
 # Channel deps come from the fork's re-added `discord`/`telegram` extras (see
 # pyproject.toml). Upstream's 462a0dfb moved these into per-channel manifests
-# with a runtime pip auto-installer that can't run in our non-root/offline
-# container, so we install them at build via the extras instead. Keep this in
-# sync with the enabled channels.
+# with a runtime pip auto-installer; we install them at build via the extras
+# instead. Keep this in sync with the enabled channels.
 ARG NANOBOT_EXTRAS=discord,telegram
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 RUN mkdir -p nanobot && touch nanobot/__init__.py && \
-    NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
+    if [ -n "$NANOBOT_EXTRAS" ]; then \
+        NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
+            --python "$VIRTUAL_ENV/bin/python" --no-cache ".[${NANOBOT_EXTRAS}]"; \
+    else \
+        NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
+            --python "$VIRTUAL_ENV/bin/python" --no-cache .; \
+    fi && \
     rm -rf nanobot
 
 # Copy the full source and install
 COPY nanobot/ nanobot/
 COPY plugins/ plugins/
-# In-tree gateway webui is intentionally absent (no nanobot/web/dist/) —
-# the nanobot-channel-webui plugin provides the UI on port 18792.
-RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EXTRAS]" && \
-        uv pip install --system --no-cache \
-            /app/plugins/nanobot-channel-webui \
-            /app/plugins/nanobot-channel-openaiapi \
-            /app/plugins/nanobot-channel-mcpserver
+# In-tree gateway webui is intentionally absent (no nanobot/web/dist/, no
+# upstream webui-builder stage) — the nanobot-channel-webui plugin provides the
+# UI on port 18792. Install into the writable venv (on PATH) alongside the
+# discord/telegram extras and our three plugin channel packages.
+RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
+        --python "$VIRTUAL_ENV/bin/python" --no-cache ".[$NANOBOT_EXTRAS]" && \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache \
+        /app/plugins/nanobot-channel-webui \
+        /app/plugins/nanobot-channel-openaiapi \
+        /app/plugins/nanobot-channel-mcpserver
 
 # Render deploy template (see render.yaml): committed gateway config that wires
 # secrets through ${ANTHROPIC_API_KEY} / ${NANOBOT_WEB_TOKEN} env vars (resolved
@@ -42,7 +56,8 @@ RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --system --no-cache ".[$NANOBOT_EX
 # won't shadow it. Only used when RENDER=true; ignored by local runs.
 COPY render-config.json ./
 
-# Create non-root user and config directory
+# Create non-root user and config dir; hand ownership of /app (incl. the
+# writable venv) to it so a channel's runtime dep install can write.
 RUN useradd -m -u 1000 -s /bin/bash nanobottie && \
     mkdir -p /home/nanobottie/.nanobot && \
     chown -R nanobottie:nanobottie /home/nanobottie /app
