@@ -488,9 +488,7 @@ class AgentLoop:
         defaults = config.agents.defaults
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()
-        # Local: `defaults.default_text_model` overrides the resolved preset model
-        # (lets us pin a text model while still using presets for everything else).
-        model = extra.pop("model", None) or defaults.default_text_model or resolved.model
+        model = extra.pop("model", None) or resolved.model
         context_window_tokens = extra.pop("context_window_tokens", None) or resolved.context_window_tokens
         provider_snapshot_loader = extra.pop("provider_snapshot_loader", None)
         preset_snapshot_loader = extra.pop("preset_snapshot_loader", None) or preset_helpers.make_preset_snapshot_loader(

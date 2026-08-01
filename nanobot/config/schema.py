@@ -120,10 +120,6 @@ class AgentDefaults(Base):
     model_preset: str | None = None  # Active preset name — takes precedence over fields below
     model: str = "anthropic/claude-opus-4-5"
     provider: str = "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    default_text_model: str | None = None
-    default_vision_model: str | None = None
-    default_text_provider: str | None = None
-    default_vision_provider: str | None = None
     max_tokens: int = 8192
     context_window_tokens: int = 200_000
     context_block_limit: int | None = None

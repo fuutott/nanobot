@@ -55,41 +55,26 @@ def _resolve_provider_setup(
     preset: ModelPresetConfig,
     model: str | None = None,
 ) -> _ProviderSetup:
-    """Resolve and validate provider configuration without constructing a client.
-
-    Local override: ``defaults.default_text_provider`` forces the provider
-    regardless of model/preset routing (pipe all text traffic through an
-    aggregator gateway like OpenRouter).
-    """
+    """Resolve and validate provider configuration without constructing a client."""
     model = model or preset.model
-    defaults = config.agents.defaults
-    forced_text_provider = (defaults.default_text_provider or "").strip()
-    if forced_text_provider:
-        forced_spec = find_by_name(forced_text_provider)
-        if not forced_spec:
-            raise ValueError(
-                f"Unknown defaultTextProvider '{defaults.default_text_provider}'."
-            )
-        provider_name = forced_spec.name
-        p = getattr(config.providers, provider_name, None)
-        spec = forced_spec
-    else:
-        provider_name = config.get_provider_name(model, preset=preset)
-        p = config.get_provider(model, preset=preset)
-        if not provider_name:
-            raise ValueError(f"No provider is configured for model '{model}'.")
-        spec = find_by_name(provider_name)
-        if not spec and p:
-            if not p.api_base:
-                raise ValueError(f"Provider '{provider_name}' requires api_base in config.")
-            spec = create_dynamic_spec(
-                provider_name,
-                display_name=(p.display_name or "") if p else "",
-                thinking_style=(p.thinking_style or "") if p else "",
-                strip_history_reasoning_content=bool(
-                    getattr(p, "strip_history_reasoning_content", False)
-                ),
-            )
+    provider_name = config.get_provider_name(model, preset=preset)
+    p = config.get_provider(model, preset=preset)
+    if not provider_name:
+        raise ValueError(f"No provider is configured for model '{model}'.")
+    spec = find_by_name(provider_name)
+    if not spec and p:
+        if not p.api_base:
+            raise ValueError(f"Provider '{provider_name}' requires api_base in config.")
+        # Fork: strip_history_reasoning_content is our Cerebras 400-fix for
+        # custom providers (no upstream equivalent); the rest is upstream's.
+        spec = create_dynamic_spec(
+            provider_name,
+            display_name=(p.display_name or "") if p else "",
+            thinking_style=(p.thinking_style or "") if p else "",
+            strip_history_reasoning_content=bool(
+                getattr(p, "strip_history_reasoning_content", False)
+            ),
+        )
     if spec and spec.is_transcription_only:
         raise ValueError(f"Provider '{provider_name}' only supports transcription.")
     backend = spec.backend if spec else "openai_compat"
@@ -161,16 +146,6 @@ def _make_provider_core(
     spec = setup.spec
     backend = setup.backend
 
-    # Fork: resolve api_base from the (possibly forced) provider's own config /
-    # spec default first, so `default_text_provider` routing points at the right
-    # gateway even when the model name wouldn't map to it. Falls back to the
-    # model-derived lookup.
-    api_base = p.api_base if p and p.api_base else None
-    if not api_base and spec and (spec.is_gateway or spec.is_local):
-        api_base = spec.default_api_base or None
-    if not api_base:
-        api_base = config.get_api_base(model, preset=preset)
-
     if backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
@@ -206,7 +181,7 @@ def _make_provider_core(
 
         provider = AnthropicProvider(
             api_key=p.api_key if p else None,
-            api_base=api_base,
+            api_base=config.get_api_base(model, preset=preset),
             default_model=model,
             extra_headers=_provider_extra_headers(spec, p),
         )
@@ -226,7 +201,7 @@ def _make_provider_core(
 
         provider = OpenAICompatProvider(
             api_key=p.api_key if p else None,
-            api_base=api_base,
+            api_base=config.get_api_base(model, preset=preset),
             default_model=model,
             extra_headers=_provider_extra_headers(spec, p),
             spec=spec,
@@ -366,7 +341,6 @@ def provider_signature(
         resolved.reasoning_effort,
         resolved.context_window_tokens,
         getattr(p, "proxy", None) if p else None,
-        config.agents.defaults.default_text_provider,
         p.thinking_style if p else None,
         getattr(p, "strip_history_reasoning_content", False) if p else False,
         tuple(_fallback_signature(fallback) for fallback in fallback_presets),
