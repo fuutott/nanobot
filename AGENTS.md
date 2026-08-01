@@ -212,15 +212,14 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 | `cli/commands.py` | `mcp-auth` Typer command (~230 lines at end of file) + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers | Interactive OAuth setup for remote MCP servers |
 | `config/schema.py` | `OAuthConfig` class + `MCPServerConfig.auth` field | Wire OAuth into MCP server config |
 
-### Multi-provider routing (clean composition inside upstream's factory/loop)
+### Per-subagent provider/model override (clean composition inside upstream's factory/loop)
 
 | Area | What we keep | Why |
 |------|-------------|-----|
-| `providers/factory.py` | Forced-provider branch at start of `_make_provider_core` + extracted `api_base` resolver + `default_text_provider` in `provider_signature` cache key | Route all text traffic through a single aggregator (e.g. OpenRouter) regardless of preset routing |
-| `agent/loop.py` | `from_config`: `defaults.default_text_model or resolved.model` override; `_subagent_provider_factory` + `available_providers` / `available_models` properties | Honor `defaultTextModel` config field; per-subagent provider/model override discovery |
+| `agent/loop.py` | `from_config`: `_subagent_provider_factory` + `available_providers` / `available_models` properties | Per-subagent provider/model override discovery |
 | `agent/subagent.py` | `provider_factory` callback + per-spawn `provider` / `model` overrides + `available_providers` / `available_models` lists | Per-subagent provider/model override |
 | `agent/tools/spawn.py` | `provider` + `model` schema params | Surface the override to the agent |
-| `config/schema.py` | `default_text_model`, `default_text_provider`, `default_vision_model`, `default_vision_provider` on `AgentDefaults` | Multi-provider routing fields |
+| `providers/factory.py` | `strip_history_reasoning_content` passthrough in `create_dynamic_spec` + `provider_signature` cache key | Cerebras 400-fix: strip prior-turn reasoning content from history for providers that reject it (`stripHistoryReasoningContent` per-provider config) |
 
 ### Channel hardening (pure additions / fixes upstream lacks)
 
@@ -246,6 +245,8 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 - **`dream.interval_h=8` default** — dropped after upstream's Dream refactor (`d1a94dae` replaced two-phase Dream with simple cron + `process_direct`). Runtime config also reverted to upstream's 2h default; `maxBatchSize` and `maxIterations` are now deprecated fields.
 - **`MCPConnection` class + epoch-based reconnect** — dropped after upstream's `e9145b7a` / `d0eba7cd` added `_MCPWrapperBase` with `_refresh_session_after_termination` + `_attach_reconnect_handlers` + state-level `_reload_lock`. Upstream's coarser state-lock equivalently protects against thundering herd, and on session-terminated errors it tears down + rebuilds the whole server, swapping the live session into each wrapper. Only the OAuth token resolution remained local (now injected at the top of upstream's `connect_single_server`). `tests/agent/test_mcp_reconnect.py` deleted (its subject no longer exists).
 - **`_mcp_owner` task + `_mcp_shutdown_event`** — dropped after upstream's `edf78e70` added `_OwnedMCPConnection` + a per-server `mcp:{name}` owner task inside `connect_single_server`. Our single loop-level owner task existed to keep anyio cancel scopes off `run()`; upstream now does the same thing per-connection (each task opens its stack, waits on `close_requested`, closes in its own `finally`), which is strictly finer-grained — one failing server can't disturb the others, and reconnect/hot-reload close independently. `run()` now just `await self._connect_mcp()` and `close_mcp()` just delegates to `agent_context.close_mcp`. `_start_oauth_refresh_task` / `_oauth_refresh_loop` remain local.
+- **`default_text_provider` / `default_text_model` force-routing** — removed as unnecessary divergence (not upstream-absorbed; just never earned its keep). It forced all text traffic through one aggregator regardless of preset routing, but the config fields were unset in practice and custom providers (`cerebrasPersonal/Paid`) already route natively through upstream's `convert_extra_providers`. Dropped the forced-provider branch + extracted `api_base` resolver from `factory.py` (`config.get_api_base` already does the `p.api_base → spec.default_api_base` fallback), the `default_text_provider` cache-key line from `provider_signature`, and the `defaults.default_text_model or resolved.model` override from `loop.py`'s `from_config`. Per-subagent provider/model override + `strip_history_reasoning_content` stay local.
+- **`default_vision_provider` / `default_vision_model`** — removed as dead config: declared on `AgentDefaults` and set in config, but consumed nowhere in code.
 
 ## Local testing
 
