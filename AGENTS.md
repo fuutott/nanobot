@@ -209,7 +209,7 @@ These are intentional divergences from `HKUDS/nanobot`. Apply them on top of ups
 | `agent/tools/oauth_flow.py`, `oauth_tokens.py` | Entire files (upstream-untouched) | OAuth device-flow + dynamic client registration + token storage |
 | `agent/tools/mcp.py` | `_resolve_oauth_token` function + call site at top of upstream's `connect_single_server` that injects `Authorization: Bearer …` into HTTP transport headers | Talk to OAuth 2.1 remote MCP servers. Token re-resolves on every reconnect because upstream's `_refresh_terminated_server` calls `connect_single_server` again — refresh-token rotation happens for free. |
 | `agent/loop.py` | `_start_oauth_refresh_task` + `_oauth_refresh_loop` | Refresh OAuth tokens before expiry |
-| `cli/commands.py` | `mcp-auth` Typer command (~230 lines at end of file) + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers | Interactive OAuth setup for remote MCP servers |
+| `cli/mcp_auth.py` | `mcp_auth` Typer command + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers (own module, registered in `commands.py` via `app.command("mcp-auth")(mcp_auth)`, mirroring upstream's `cli/provider.py` / `cli/webui.py` split) | Interactive OAuth setup for remote MCP servers; kept out of `commands.py` so CLI-area syncs don't conflict on our block |
 | `config/schema.py` | `OAuthConfig` class + `MCPServerConfig.auth` field | Wire OAuth into MCP server config |
 
 ### Per-subagent provider/model override (clean composition inside upstream's factory/loop)
