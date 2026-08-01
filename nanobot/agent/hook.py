@@ -25,6 +25,7 @@ class AgentHookContext:
     tool_events: list[dict[str, str]] = field(default_factory=list)
     streamed_content: bool = False
     streamed_reasoning: bool = False
+    stream_continues_current_message: bool = False
     final_content: str | None = None
     stop_reason: str | None = None
     error: str | None = None
@@ -58,6 +59,7 @@ class AgentTurnHookContext:
     session_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     ephemeral: bool = False
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentHook:

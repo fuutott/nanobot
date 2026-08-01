@@ -92,7 +92,13 @@ export function ThreadMessages({
           unit.type === "activity"
           && next?.type === "message"
           && next.message.role === "assistant";
-
+        const deferOffscreenRender =
+          index < units.length - 1
+          && (
+            unit.type === "activity"
+              ? !liveActivityClusterIndices.has(index)
+              : unit.message.role === "assistant" && !unit.message.isStreaming
+          );
         const userPromptId =
           unit.type === "message" && unit.message.role === "user"
             ? unit.message.id
@@ -101,7 +107,11 @@ export function ThreadMessages({
           unit.type === "message" && unit.message.role === "assistant" && forkFlags[index]
             ? nextUserIndex
             : undefined;
-        if (unit.type === "message" && unit.message.role === "user") nextUserIndex += 1;
+        if (
+          unit.type === "message"
+          && unit.message.role === "user"
+          && unit.message.deliveryStatus !== "failed"
+        ) nextUserIndex += 1;
 
         return (
           <ThreadDisplayUnit
@@ -110,6 +120,7 @@ export function ThreadMessages({
             marginTop={marginTop}
             userPromptId={userPromptId}
             hasBodyBelow={hasBodyBelow}
+            deferOffscreenRender={deferOffscreenRender}
             isTurnStreaming={liveActivityClusterIndices.has(index)}
             forkIndex={forkIndex}
             showForkBoundary={index === forkBoundaryAfterUnitIndex}
@@ -131,6 +142,7 @@ interface ThreadDisplayUnitProps {
   marginTop: string;
   userPromptId?: string;
   hasBodyBelow: boolean;
+  deferOffscreenRender: boolean;
   isTurnStreaming: boolean;
   forkIndex?: number;
   showForkBoundary: boolean;
@@ -147,6 +159,7 @@ const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
   marginTop,
   userPromptId,
   hasBodyBelow,
+  deferOffscreenRender,
   isTurnStreaming,
   forkIndex,
   showForkBoundary,
@@ -157,17 +170,20 @@ const ThreadDisplayUnit = memo(function ThreadDisplayUnit({
   onOpenFilePreview,
   onForkFromMessage,
 }: ThreadDisplayUnitProps) {
+  // Introducing content-visibility after a unit has painted can move the
+  // browser's scroll anchor. Only units deferred on their first render may
+  // remain deferred.
+  const hasRenderedEagerlyRef = useRef(!deferOffscreenRender);
+  if (!deferOffscreenRender) hasRenderedEagerlyRef.current = true;
+  const stableDeferOffscreenRender =
+    deferOffscreenRender && !hasRenderedEagerlyRef.current;
   const onForkFromHere = useCallback(() => {
     if (forkIndex !== undefined) onForkFromMessage?.(forkIndex);
   }, [forkIndex, onForkFromMessage]);
-  const deferOffscreenRender = unit.type === "activity"
-    ? !isTurnStreaming
-    : unit.message.role === "assistant" && !unit.message.isStreaming;
-
   return (
     <>
       <div
-        className={`${marginTop}${deferOffscreenRender ? " thread-render-unit" : ""}`}
+        className={`${marginTop}${stableDeferOffscreenRender ? " thread-render-unit" : ""}`}
         data-user-prompt-id={userPromptId}
       >
         {unit.type === "activity" ? (
@@ -206,6 +222,7 @@ function threadDisplayUnitPropsEqual(
     && previous.marginTop === next.marginTop
     && previous.userPromptId === next.userPromptId
     && previous.hasBodyBelow === next.hasBodyBelow
+    && previous.deferOffscreenRender === next.deferOffscreenRender
     && previous.isTurnStreaming === next.isTurnStreaming
     && previous.forkIndex === next.forkIndex
     && previous.showForkBoundary === next.showForkBoundary

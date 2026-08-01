@@ -10,6 +10,17 @@ from pathlib import Path
 
 import certifi
 import pytest
+from loguru import logger
+
+
+@pytest.fixture(autouse=True)
+def _isolate_nanobot_log_activation() -> Iterator[None]:
+    """Keep CLI log settings from leaking into later tests in the same process."""
+    logger.enable("nanobot")
+    try:
+        yield
+    finally:
+        logger.enable("nanobot")
 
 
 def _add_plugin_path(path: Path) -> None:

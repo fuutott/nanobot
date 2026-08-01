@@ -237,24 +237,54 @@ function remarkSafeHtmlSubset() {
   };
 }
 
+// Recover a common model-output edge case that CommonMark leaves as literal
+// text: `**结论。**如果`, with no separator after the closing delimiter.
+const CJK_AFTER_STRONG =
+  /(?<!\\)\*\*([^*\r\n]+?)(?<!\\)\*\*(?=[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])/gu;
+
+function normalizeCjkStrongBoundaries(node: MarkdownAstNode): void {
+  if (!node.children) return;
+  node.children = node.children.flatMap((child) => {
+    if (child.type !== "text" || !child.value?.includes("**")) {
+      normalizeCjkStrongBoundaries(child);
+      return [child];
+    }
+
+    const replacement: MarkdownAstNode[] = [];
+    let cursor = 0;
+    for (const match of child.value.matchAll(CJK_AFTER_STRONG)) {
+      const start = match.index;
+      if (start > cursor) replacement.push(safeText(child.value.slice(cursor, start)));
+      replacement.push({
+        type: "strong",
+        children: [safeText(match[1])],
+      });
+      cursor = start + match[0].length;
+    }
+    if (cursor === 0) return [child];
+    if (cursor < child.value.length) replacement.push(safeText(child.value.slice(cursor)));
+    return replacement;
+  });
+}
+
+function remarkCjkStrongBoundaries() {
+  return (tree: MarkdownAstNode) => {
+    normalizeCjkStrongBoundaries(tree);
+  };
+}
+
 const remarkPlugins: NonNullable<StreamdownProps["remarkPlugins"]> = [
   remarkBreaks,
   remarkGfm,
   [remarkMath, { singleDollarTextMath: false }],
   remarkTexMath,
+  remarkCjkStrongBoundaries,
   remarkSafeHtmlSubset,
 ];
 const rehypePlugins: NonNullable<StreamdownProps["rehypePlugins"]> = [rehypeKatex];
 
 const DIRECT_LINKS = { enabled: false } as const;
 const SAFE_MARKDOWN_PROTOCOL = /^(https?|ircs?|mailto|xmpp)$/i;
-const STREAMING_ANIMATION = {
-  animation: "fadeIn",
-  duration: 180,
-  easing: "cubic-bezier(0.16, 1, 0.3, 1)",
-  sep: "word",
-  stagger: 18,
-} as const;
 
 /** Preserve react-markdown's URL policy when rendering through Streamdown. */
 const safeMarkdownUrl: NonNullable<StreamdownProps["urlTransform"]> = (url) => {
@@ -649,7 +679,9 @@ export default function MarkdownTextRenderer({
           <li
             className={cn(
               itemClassName,
-              taskItem && "flex min-w-0 items-start gap-2 text-[13px] leading-5 [&>p]:m-0",
+              taskItem
+                ? "flex min-w-0 items-start gap-2 text-[13px] leading-5 [&>p]:m-0"
+                : "[&>p]:inline",
             )}
           >
             {markdownChildren}
@@ -727,9 +759,8 @@ export default function MarkdownTextRenderer({
     <Streamdown
       mode={streaming ? "streaming" : "static"}
       parseIncompleteMarkdown
-      isAnimating={streaming}
-      animated={streaming ? STREAMING_ANIMATION : false}
-      caret={streaming ? "block" : undefined}
+      isAnimating={false}
+      animated={false}
       linkSafety={DIRECT_LINKS}
       urlTransform={safeMarkdownUrl}
       remarkPlugins={remarkPlugins}

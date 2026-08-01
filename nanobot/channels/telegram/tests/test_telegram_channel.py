@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -673,6 +674,33 @@ async def test_send_delta_stream_end_raises_and_keeps_buffer_on_failure() -> Non
         await channel.send_delta("123", "", stream_end=True)
 
     assert "123" in channel._stream_bufs
+
+
+@pytest.mark.asyncio
+async def test_send_delta_merge_next_preserves_buffer() -> None:
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    channel._app = _FakeApp(lambda: None)
+    channel._app.bot.edit_message_text = AsyncMock()
+    channel._stream_bufs["123"] = _StreamBuf(
+        text="first-",
+        message_id=7,
+        last_edit=float("inf"),
+        stream_id="s:0",
+    )
+
+    await channel.send_delta(
+        "123",
+        "boundary",
+        stream_id="s:0",
+        stream_end=True,
+        merge_next=True,
+    )
+
+    assert channel._stream_bufs["123"].text == "first-boundary"
+    channel._app.bot.edit_message_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1885,6 +1913,36 @@ async def test_on_message_location_with_text() -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_call_with_retry_accepts_timedelta_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from telegram.error import RetryAfter
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"]),
+        MessageBus(),
+    )
+    attempts = 0
+
+    async def retry_once() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RetryAfter(timedelta(seconds=1.5))
+        return "ok"
+
+    sleep = AsyncMock()
+    monkeypatch.setenv("PTB_TIMEDELTA", "1")
+    monkeypatch.setattr(
+        "nanobot.channels.telegram.runtime.asyncio.sleep",
+        sleep,
+    )
+
+    assert await channel._call_with_retry(retry_once) == "ok"
+    sleep.assert_awaited_once_with(1.5)
+
+
+@pytest.mark.asyncio
 async def test_send_text_does_not_fallback_on_network_timeout() -> None:
     """TimedOut should propagate immediately, NOT trigger plain-text fallback.
 
@@ -2291,7 +2349,7 @@ async def test_callback_query_ignores_unauthorized_user_before_side_effects() ->
         data="Yes",
         answer=AsyncMock(),
         message=SimpleNamespace(
-            chat_id=123,
+            chat=SimpleNamespace(id=123),
             edit_reply_markup=AsyncMock(),
         ),
     )
@@ -2305,3 +2363,35 @@ async def test_callback_query_ignores_unauthorized_user_before_side_effects() ->
     query.answer.assert_not_awaited()
     query.message.edit_reply_markup.assert_not_awaited()
     channel._handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_query_handles_inaccessible_message() -> None:
+    from telegram import Chat, InaccessibleMessage
+
+    channel = TelegramChannel(
+        TelegramConfig(enabled=True, token="123:abc", allow_from=["*"], inline_keyboards=True),
+        MessageBus(),
+    )
+    channel._handle_message = AsyncMock()
+    channel._start_typing = lambda _chat_id: None
+
+    query = SimpleNamespace(
+        id="cb_inaccessible",
+        data="Yes",
+        answer=AsyncMock(),
+        message=InaccessibleMessage(
+            chat=Chat(id=123, type="private"),
+            message_id=456,
+        ),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=12345, username="alice", first_name="Alice"),
+    )
+
+    await channel._on_callback_query(update, None)
+
+    query.answer.assert_awaited_once()
+    channel._handle_message.assert_awaited_once()
+    assert channel._handle_message.await_args.kwargs["chat_id"] == "123"

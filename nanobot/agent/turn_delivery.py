@@ -6,7 +6,7 @@ import dataclasses
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import (
@@ -19,6 +19,9 @@ from nanobot.bus.outbound_events import (
 from nanobot.bus.progress import build_bus_progress_callback
 from nanobot.bus.queue import MessageBus
 from nanobot.bus.runtime_events import RuntimeEventBus, RuntimeEventPublisher
+
+if TYPE_CHECKING:
+    from nanobot.utils.llm_runtime import LLMRuntime
 
 
 @dataclass(frozen=True)
@@ -62,7 +65,7 @@ class TurnDeliveryFactory:
         route = self._default_route(msg, session_key)
         if self.route_policy is not None:
             route = self.route_policy(msg, session_key, route)
-            if not isinstance(route, TurnRoute):
+            if not isinstance(cast(object, route), TurnRoute):
                 raise TypeError("turn route policy must return TurnRoute")
         return TurnDelivery(
             bus=self.bus,
@@ -126,6 +129,7 @@ class TurnDelivery:
     lifecycle_message: InboundMessage = field(init=False)
     _stream_base_id: str | None = field(init=False, default=None)
     _stream_segment: int = field(init=False, default=0)
+    _stream_open: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self.delivery_message = dataclasses.replace(
@@ -185,7 +189,7 @@ class TurnDelivery:
                 started_at=started_at,
             )
 
-    def record_runtime(self, runtime: Any) -> None:
+    def record_runtime(self, runtime: LLMRuntime) -> None:
         self.runtime_event_publisher.record_turn_runtime(self.session_key, runtime)
 
     def record_latency(self, latency_ms: int | None) -> None:
@@ -284,8 +288,14 @@ class TurnDelivery:
                 metadata=self.delivery_message.metadata,
             )
         )
+        self._stream_open = True
 
-    async def _publish_stream_end(self, *, resuming: bool = False) -> None:
+    async def _publish_stream_end(
+        self,
+        *,
+        resuming: bool = False,
+        merge_next: bool = False,
+    ) -> None:
         await self.bus.publish_outbound(
             outbound_message_for_event(
                 channel=self.delivery_message.channel,
@@ -293,8 +303,16 @@ class TurnDelivery:
                 event=StreamEndEvent(
                     stream_id=self._stream_id(),
                     resuming=resuming,
+                    merge_next=merge_next,
                 ),
                 metadata=self.delivery_message.metadata,
             )
         )
-        self._stream_segment += 1
+        self._stream_open = merge_next
+        if not merge_next:
+            self._stream_segment += 1
+
+    async def abort_stream(self) -> None:
+        """Close an interrupted stream so stateful channels can release its buffer."""
+        if self._stream_open:
+            await self._publish_stream_end()
