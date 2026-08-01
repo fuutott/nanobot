@@ -63,13 +63,21 @@ def _as_json_object(value: object) -> dict[str, Any] | None:
 
 
 def _response_object(value: object) -> dict[str, Any] | None:
-    """Convert a Responses SDK model or JSON object to a dictionary."""
+    """Convert a Responses SDK model or JSON object to a dictionary.
+
+    ``exclude_none`` matters: output items are replayed verbatim as request
+    input by the conversation state, and a bare ``model_dump()`` materializes
+    every declared-but-absent SDK field as ``null``. A ``reasoning`` item the
+    server sends without ``status`` would come back carrying ``status: null``,
+    which the Responses input schema rejects with
+    ``Unknown parameter: 'input[N].status'``.
+    """
     object_value = _as_json_object(value)
     if object_value is not None:
         return object_value
     dump = getattr(value, "model_dump", None)
     if callable(dump):
-        dumped = _as_json_object(dump())
+        dumped = _as_json_object(dump(exclude_none=True))
         if dumped is not None:
             return dumped
     try:

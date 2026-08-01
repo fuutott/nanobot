@@ -1731,3 +1731,56 @@ class TestConsumeSdkStream:
         assert tool_calls[0].arguments == "{bad"
         mock_logger.warning.assert_called_once()
         assert "Failed to parse tool call arguments" in str(mock_logger.warning.call_args)
+
+
+class TestOutputItemSerialization:
+    """SDK output items are replayed verbatim as request input on the next call.
+
+    A bare ``model_dump()`` materializes every declared-but-absent field as
+    ``null``. For ``reasoning`` items the server omits ``status`` entirely, and
+    the Responses *input* schema has no such field, so replaying the null form
+    fails the whole request with
+    ``Unknown parameter: 'input[N].status'``.
+    """
+
+    @staticmethod
+    def _reasoning_item():
+        from openai.types.responses import ResponseReasoningItem
+
+        return ResponseReasoningItem.model_validate({
+            "id": "rs_1",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "enc",
+        })
+
+    def test_capture_does_not_invent_status_on_reasoning_item(self):
+        capture = ResponsesStreamCapture()
+        capture.record_output_item(0, self._reasoning_item())
+
+        (dumped,) = capture.output_items
+
+        assert "status" not in dumped
+        assert dumped["id"] == "rs_1"
+        assert dumped["encrypted_content"] == "enc"
+
+    def test_replayed_state_items_carry_no_null_status(self):
+        capture = ResponsesStreamCapture()
+        capture.record_output_item(0, self._reasoning_item())
+        state = build_responses_state(
+            provider="openai_compat:openai:https://api.openai.com/v1",
+            model="gpt-5.6-terra",
+            input_items=[{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            output_items=capture.output_items,
+        )
+
+        _, items, replayed = prepare_responses_input(
+            [{"role": "user", "content": "hi"}],
+            state=state,
+            provider="openai_compat:openai:https://api.openai.com/v1",
+            model="gpt-5.6-terra",
+        )
+
+        assert replayed is True
+        reasoning = [item for item in items if item.get("type") == "reasoning"]
+        assert reasoning and all("status" not in item for item in reasoning)
