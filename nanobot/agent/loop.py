@@ -1451,7 +1451,7 @@ class AgentLoop:
         )
         if not has_auth:
             return
-        self._schedule_background(self._oauth_refresh_loop())
+        self.schedule_background(self._oauth_refresh_loop())
 
     async def _oauth_refresh_loop(self) -> None:
         """Periodically check and refresh OAuth tokens for MCP servers.
