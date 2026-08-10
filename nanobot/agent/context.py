@@ -10,9 +10,14 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.agent.tools import image_generation as image_generation_tools
 from nanobot.agent.tools import mcp as mcp_tools
+from nanobot.agent.tools import sessions as session_tools
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.apps.cli import utils as cli_app_utils
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import (
+    INBOUND_META_RUNTIME_CONTROL,
+    RUNTIME_CONTROL_SESSION_DISCARD,
+    InboundMessage,
+)
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_END,
     RUNTIME_CONTEXT_MESSAGE_META,
@@ -30,7 +35,11 @@ from nanobot.utils.prompt_templates import render_template
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return persisted kwargs for turn-attached capabilities."""
-    return cli_app_utils.session_extra(metadata) | mcp_tools.session_extra(metadata)
+    return (
+        cli_app_utils.session_extra(metadata)
+        | mcp_tools.session_extra(metadata)
+        | session_tools.session_extra(metadata)
+    )
 
 
 async def connect_mcp(state: Any, tools: ToolRegistry) -> None:
@@ -42,6 +51,9 @@ async def close_mcp(state: Any) -> None:
 
 
 async def handle_runtime_control(state: Any, msg: InboundMessage, tools: ToolRegistry) -> bool:
+    if msg.metadata.get(INBOUND_META_RUNTIME_CONTROL) == RUNTIME_CONTROL_SESSION_DISCARD:
+        await state.discard_session(msg.session_key)
+        return True
     for handler in (
         image_generation_tools.handle_runtime_control,
         mcp_tools.handle_runtime_control,
@@ -74,6 +86,7 @@ class ContextBuilder:
         channel: str | None = None,
         session_summary: str | None = None,
         workspace: Path | None = None,
+        include_memory: bool = True,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
@@ -88,9 +101,10 @@ class ContextBuilder:
 
         parts.append(render_template("agent/tool_contract.md"))
 
-        memory = self.memory.read_memory()
-        if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
+        if include_memory:
+            memory = self.memory.read_memory()
+            if memory and not self._is_template_content(memory, "memory/MEMORY.md"):
+                parts.append(f"# Memory\n\n## Long-term Memory\n{memory}")
 
         active_skills = self.skills.get_always_skills()
         active_skills.extend(
@@ -214,6 +228,7 @@ class ContextBuilder:
         session_summary: str | None = None,
         runtime_context_blocks: Sequence[RuntimeContextBlock] | None = None,
         workspace: Path | None = None,
+        include_memory: bool = True,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
@@ -233,6 +248,7 @@ class ContextBuilder:
                     channel=channel,
                     session_summary=session_summary,
                     workspace=root,
+                    include_memory=include_memory,
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     unified_session=unified_session,

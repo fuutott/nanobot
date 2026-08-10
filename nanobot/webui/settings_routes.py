@@ -13,7 +13,6 @@ import json
 import time
 from collections.abc import Callable
 from typing import Any, cast
-from urllib.parse import unquote
 
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
@@ -31,7 +30,7 @@ from nanobot.channels.contracts import (
 )
 from nanobot.channels.registry import load_channel_plugin
 from nanobot.channels.validation import validate_channel_config
-from nanobot.config.loader import get_config_path, load_config, save_config
+from nanobot.config.schema import Config
 from nanobot.optional_features import (
     OptionalFeatureError,
     extra_installed,
@@ -40,7 +39,6 @@ from nanobot.optional_features import (
 )
 from nanobot.pairing import approve_code, deny_code, list_pending
 from nanobot.webui.cli_apps_api import cli_apps_action, cli_apps_payload
-from nanobot.webui.http_utils import case_insensitive_header
 from nanobot.webui.http_utils import is_local_browser_request as _is_local_browser_request
 from nanobot.webui.http_utils import query_first as _query_first
 from nanobot.webui.mcp_presets_api import mcp_presets_settings_action
@@ -72,21 +70,13 @@ from nanobot.webui.settings_api import (
     update_transcription_settings,
     update_web_search_settings,
 )
+from nanobot.webui.settings_services import WebUISettingsServices
 from nanobot.webui.version_check import check_for_update
 
 QueryParams = dict[str, list[str]]
 
-_MCP_VALUES_HEADER = "X-Nanobot-MCP-Values"
-_MCP_VALUES_HEADER_MAX_BYTES = 64 * 1024
-_PROVIDER_VALUES_HEADER = "X-Nanobot-Provider-Values"
-_PROVIDER_VALUES_HEADER_MAX_BYTES = 64 * 1024
-_CHANNEL_VALUES_HEADER = "X-Nanobot-Channel-Values"
-_CHANNEL_VALUES_HEADER_MAX_BYTES = 64 * 1024
-_API_SERVICE_VALUES_HEADER = "X-Nanobot-API-Service-Values"
-_API_SERVICE_VALUES_HEADER_MAX_BYTES = 8 * 1024
-_OAUTH_CODE_HEADER = "X-Nanobot-OAuth-Code"
-_OAUTH_CALLBACK_HEADER = "X-Nanobot-OAuth-Callback"
-_OAUTH_RESPONSE_HEADER_MAX_BYTES = 8 * 1024
+_WEBUI_MUTATION_PAYLOAD_ATTR = "_nanobot_webui_mutation_payload"
+_WEBUI_MUTATION_REQUEST_ATTR = "_nanobot_webui_mutation_request"
 
 _SKIP_FIELD = object()
 _CHANNEL_CONNECT_ACTIONS = frozenset({"start", "poll", "cancel"})
@@ -112,6 +102,63 @@ _MCP_PRESET_ACTIONS_BY_PATH = {
     "/api/settings/mcp-presets/tools": "tools",
 }
 
+_SETTINGS_MUTATION_PATHS = frozenset({
+    "/api/settings/update",
+    "/api/settings/model-configurations/create",
+    "/api/settings/model-configurations/update",
+    "/api/settings/model-configurations/delete",
+    "/api/settings/model-configurations/migrate",
+    "/api/settings/model-call-order/update",
+    "/api/settings/provider/update",
+    "/api/settings/provider/create",
+    "/api/settings/provider/oauth-login",
+    "/api/settings/provider/oauth-login/complete",
+    "/api/settings/provider/oauth-logout",
+    "/api/settings/web-search/update",
+    "/api/settings/api-service/start",
+    "/api/settings/api-service/stop",
+    "/api/settings/image-generation/update",
+    "/api/settings/transcription/update",
+    "/api/settings/network-safety/update",
+    "/api/settings/cli-apps/install",
+    "/api/settings/cli-apps/update",
+    "/api/settings/cli-apps/uninstall",
+    "/api/settings/cli-apps/test",
+    "/api/settings/nanobot-features/enable",
+    "/api/settings/nanobot-features/disable",
+    "/api/settings/channels/validate",
+    "/api/settings/channels/configure",
+    "/api/settings/pairing/approve",
+    "/api/settings/pairing/deny",
+    *_MCP_PRESET_ACTIONS_BY_PATH,
+})
+
+
+def _mutation_payload(request: WsRequest) -> dict[str, Any] | None:
+    payload = getattr(request, _WEBUI_MUTATION_PAYLOAD_ATTR, None)
+    if not isinstance(payload, dict):
+        return None
+    return cast(dict[str, Any], payload)
+
+
+def _query_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def _payload_query(payload: dict[str, Any]) -> QueryParams:
+    return {
+        key: [_query_value(value)]
+        for key, value in payload.items()
+        if key
+        and key not in {"authorization_response", "channel", "values"}
+    }
+
 
 class WebUISettingsRouter:
     """Route WebUI Settings HTTP requests behind a transport-neutral boundary."""
@@ -119,6 +166,7 @@ class WebUISettingsRouter:
     def __init__(
         self,
         *,
+        settings: WebUISettingsServices,
         bus: MessageBus,
         logger: Any,
         check_api_token: Callable[[WsRequest], bool],
@@ -130,6 +178,7 @@ class WebUISettingsRouter:
         channel_feature_action: Callable[..., Any] | None = None,
         channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
+        self.settings = settings
         self.bus = bus
         self.logger = logger
         self._check_api_token = check_api_token
@@ -144,6 +193,15 @@ class WebUISettingsRouter:
         self._channel_connectors: dict[str, Any] = {}
 
     async def dispatch(self, connection: Any, request: WsRequest, path: str) -> Response | None:
+        if self.is_mutation_path(path) and not getattr(
+            request,
+            _WEBUI_MUTATION_REQUEST_ATTR,
+            False,
+        ):
+            return self._error_response(
+                405,
+                "WebUI mutations require an authenticated WebSocket",
+            )
         if path == "/api/settings":
             return self._handle_settings(request)
         if path == "/api/settings/usage":
@@ -230,7 +288,17 @@ class WebUISettingsRouter:
             return await self._handle_settings_mcp_presets(request, mcp_action)
         return None
 
+    @staticmethod
+    def is_mutation_path(path: str) -> bool:
+        return (
+            path in _SETTINGS_MUTATION_PATHS
+            or _channel_connect_route(path) is not None
+        )
+
     def _query(self, request: WsRequest) -> QueryParams:
+        payload = _mutation_payload(request)
+        if payload is not None:
+            return _payload_query(payload)
         return self._parse_query(request.path)
 
     def _authorized(self, request: WsRequest) -> bool:
@@ -260,70 +328,18 @@ class WebUISettingsRouter:
         )
 
     def _parse_mcp_settings_query(self, request: WsRequest) -> QueryParams:
-        query = self._query(request)
-        raw = request.headers.get(_MCP_VALUES_HEADER)
-        if not raw:
-            return query
-        if len(raw.encode("utf-8")) > _MCP_VALUES_HEADER_MAX_BYTES:
-            raise WebUISettingsError("MCP settings payload is too large")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise WebUISettingsError("invalid MCP settings payload") from exc
-        if not isinstance(payload, dict):
-            raise WebUISettingsError("MCP settings payload must be a JSON object")
-        payload = cast(dict[object, Any], payload)
-        merged = {key: list(values) for key, values in query.items()}
-        for key, value in payload.items():
-            if not isinstance(key, str) or not key:
-                raise WebUISettingsError("MCP settings payload contains an invalid key")
-            if value is None:
-                continue
-            if isinstance(value, str):
-                text = value.strip()
-            else:
-                text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            if text:
-                merged[key] = [text]
-        return merged
+        return self._query(request)
 
     def _parse_provider_settings_query(self, request: WsRequest) -> QueryParams:
-        query = self._query(request)
-        raw = request.headers.get(_PROVIDER_VALUES_HEADER)
-        if not raw:
-            return query
-        if len(raw.encode("utf-8")) > _PROVIDER_VALUES_HEADER_MAX_BYTES:
-            raise WebUISettingsError("provider settings payload is too large")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            try:
-                payload = json.loads(unquote(raw))
-            except json.JSONDecodeError:
-                raise WebUISettingsError("invalid provider settings payload") from exc
-        if not isinstance(payload, dict):
-            raise WebUISettingsError("provider settings payload must be a JSON object")
-        payload = cast(dict[object, Any], payload)
-
-        merged = {key: list(values) for key, values in query.items()}
-        for key, value in payload.items():
-            if not isinstance(key, str) or not key:
-                raise WebUISettingsError("provider settings payload contains an invalid key")
-            if isinstance(value, str):
-                text = value
-            elif value is None:
-                text = ""
-            else:
-                text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            merged[key] = [text]
-        return merged
+        return self._query(request)
 
     def _handle_settings(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         return self._json_response(
             self._with_restart_state(
-                settings_payload(
+                self.settings.read(
+                    settings_payload,
                     surface=self._runtime_surface,
                     runtime_capability_overrides=self._runtime_capabilities,
                 )
@@ -333,7 +349,7 @@ class WebUISettingsRouter:
     def _handle_settings_usage(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
-        return self._json_response(settings_usage_payload())
+        return self._json_response(self.settings.read(settings_usage_payload))
 
     def _handle_settings_pairing(self, request: WsRequest) -> Response:
         if not self._authorized(request):
@@ -379,7 +395,7 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_agent_settings(self._query(request))
+            payload = self.settings.mutate(update_agent_settings, self._query(request))
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload, section="runtime"))
@@ -388,7 +404,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = create_model_configuration(self._query(request))
+            payload = self.settings.mutate(
+                create_model_configuration,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -397,7 +416,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_model_configuration(self._query(request))
+            payload = self.settings.mutate(
+                update_model_configuration,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -406,7 +428,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = delete_model_configuration(self._query(request))
+            payload = self.settings.mutate(
+                delete_model_configuration,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -415,7 +440,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = migrate_model_configurations(self._query(request))
+            payload = self.settings.mutate(
+                migrate_model_configurations,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -424,7 +452,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_model_call_order(self._query(request))
+            payload = self.settings.mutate(
+                update_model_call_order,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -433,7 +464,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_provider_settings(self._parse_provider_settings_query(request))
+            payload = self.settings.mutate(
+                update_provider_settings,
+                self._parse_provider_settings_query(request)
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         payload = await self._apply_image_generation_runtime_change(payload)
@@ -443,7 +477,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = create_provider_settings(self._parse_provider_settings_query(request))
+            payload = self.settings.mutate(
+                create_provider_settings,
+                self._parse_provider_settings_query(request)
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -452,7 +489,11 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = await asyncio.to_thread(provider_models_payload, self._query(request))
+            payload = await asyncio.to_thread(
+                self.settings.read,
+                provider_models_payload,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception:
@@ -470,27 +511,33 @@ class WebUISettingsRouter:
         query = self._query(request)
         try:
             if action == "login":
-                payload = await asyncio.to_thread(login_oauth_provider, query)
-            elif action == "complete":
-                authorization_response = case_insensitive_header(
-                    request.headers,
-                    _OAUTH_CALLBACK_HEADER,
-                ) or case_insensitive_header(
-                    request.headers,
-                    _OAUTH_CODE_HEADER,
-                )
-                if (
-                    len(authorization_response.encode("utf-8"))
-                    > _OAUTH_RESPONSE_HEADER_MAX_BYTES
-                ):
-                    raise WebUISettingsError("OAuth authorization response is too large")
                 payload = await asyncio.to_thread(
+                    self.settings.read,
+                    login_oauth_provider,
+                    query,
+                    oauth_flows=self.settings.oauth_flows,
+                )
+            elif action == "complete":
+                raw_response = (_mutation_payload(request) or {}).get(
+                    "authorization_response"
+                )
+                if raw_response is not None and not isinstance(raw_response, str):
+                    raise WebUISettingsError("OAuth authorization response must be a string")
+                authorization_response = raw_response
+                payload = await asyncio.to_thread(
+                    self.settings.read,
                     complete_oauth_provider,
                     query,
                     authorization_response or None,
+                    oauth_flows=self.settings.oauth_flows,
                 )
             else:
-                payload = await asyncio.to_thread(logout_oauth_provider, query)
+                payload = await asyncio.to_thread(
+                    self.settings.read,
+                    logout_oauth_provider,
+                    query,
+                    oauth_flows=self.settings.oauth_flows,
+                )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         if payload.get("status") in {"authorization_required", "pending"}:
@@ -501,7 +548,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_web_search_settings(self._query(request))
+            payload = self.settings.mutate(
+                update_web_search_settings,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload, section="browser"))
@@ -520,19 +570,22 @@ class WebUISettingsRouter:
             return self._unauthorized()
         try:
             await asyncio.to_thread(
-                nanobot_features_action,
+                self._nanobot_features_action,
                 "enable",
                 {"name": ["api"]},
                 allow_install=self._allow_feature_package_install(connection, request),
             )
-            update_api_settings(self._parse_api_service_settings_query(request))
-            config = load_config()
+            self.settings.mutate(
+                update_api_settings,
+                self._parse_api_service_settings_query(request),
+            )
+            config = self.settings.config.load()
             runtime = self._api_runtime()
             options = ApiStartOptions(
                 host=config.api.host,
                 port=config.api.port,
                 workspace=str(config.workspace_path),
-                config_path=str(get_config_path().expanduser().resolve(strict=False)),
+                config_path=str(self.settings.config.path),
             )
             current = runtime.status()
             result = await asyncio.to_thread(
@@ -549,33 +602,12 @@ class WebUISettingsRouter:
         return self._json_response(self._api_service_payload(last_action="started"))
 
     def _parse_api_service_settings_query(self, request: WsRequest) -> QueryParams:
-        query = self._query(request)
-        if "api_key" in query or "apiKey" in query:
-            raise WebUISettingsError("API service API key must be provided in the private header")
-        raw = request.headers.get(_API_SERVICE_VALUES_HEADER)
-        if not raw:
-            return query
-        if len(raw.encode("utf-8")) > _API_SERVICE_VALUES_HEADER_MAX_BYTES:
-            raise WebUISettingsError("API service settings payload is too large")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise WebUISettingsError("invalid API service settings payload") from exc
-        if not isinstance(payload, dict):
-            raise WebUISettingsError("API service settings payload must be a JSON object")
-        payload = cast(dict[str, Any], payload)
-
-        unknown = set(payload) - {"api_key"}
-        if unknown:
-            raise WebUISettingsError("API service settings payload contains an invalid key")
-        api_key = payload.get("api_key")
-        if api_key is not None and not isinstance(api_key, str):
-            raise WebUISettingsError("API service API key must be a string")
-
-        merged = {key: list(values) for key, values in query.items() if key != "api_key"}
-        if api_key is not None:
-            merged["api_key"] = [api_key]
-        return merged
+        payload = _mutation_payload(request)
+        if payload is not None:
+            api_key = payload.get("api_key")
+            if api_key is not None and not isinstance(api_key, str):
+                raise WebUISettingsError("API service API key must be a string")
+        return self._query(request)
 
     async def _handle_settings_api_service_stop(self, request: WsRequest) -> Response:
         if not self._authorized(request):
@@ -589,13 +621,11 @@ class WebUISettingsRouter:
             return self._error_response(500, self._api_runtime_message(result.message))
         return self._json_response(self._api_service_payload(last_action="stopped"))
 
-    @staticmethod
-    def _api_runtime() -> ApiRuntime:
-        config_path = get_config_path().expanduser().resolve(strict=False)
-        return ApiRuntime(paths=api_runtime_paths(config_path))
+    def _api_runtime(self) -> ApiRuntime:
+        return ApiRuntime(paths=api_runtime_paths(self.settings.config.path))
 
     def _api_service_payload(self, *, last_action: str | None = None) -> dict[str, Any]:
-        config = load_config()
+        config = self.settings.config.load()
         status = self._api_runtime().status()
         extras = optional_dependency_groups()
         connect_host = "127.0.0.1" if config.api.host in {"0.0.0.0", "::"} else config.api.host
@@ -639,7 +669,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_image_generation_settings(self._query(request))
+            payload = self.settings.mutate(
+                update_image_generation_settings,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         payload = await self._apply_image_generation_runtime_change(payload)
@@ -674,7 +707,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_transcription_settings(self._query(request))
+            payload = self.settings.mutate(
+                update_transcription_settings,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload))
@@ -683,7 +719,10 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_network_safety_settings(self._query(request))
+            payload = self.settings.mutate(
+                update_network_safety_settings,
+                self._query(request),
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         return self._json_response(self._with_restart_state(payload, section="runtime"))
@@ -697,7 +736,10 @@ class WebUISettingsRouter:
             "yes",
         }
         try:
-            payload = await cli_apps_payload(installed_only=installed_only)
+            payload = await cli_apps_payload(
+                installed_only=installed_only,
+                config_path=self.settings.config.path,
+            )
         except Exception:
             self.logger.exception("failed to load CLI Apps payload")
             return self._error_response(500, "failed to load CLI Apps")
@@ -711,7 +753,12 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = await asyncio.to_thread(cli_apps_action, action, self._query(request))
+            payload = await asyncio.to_thread(
+                cli_apps_action,
+                action,
+                self._query(request),
+                config_path=self.settings.config.path,
+            )
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception as e:
@@ -726,11 +773,28 @@ class WebUISettingsRouter:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = await asyncio.to_thread(nanobot_features_payload)
+            payload = await asyncio.to_thread(self._nanobot_features_payload)
         except Exception:
             self.logger.exception("failed to load nanobot features")
             return self._error_response(500, "failed to load nanobot features")
         return self._json_response(self._with_channel_runtime_status(payload))
+
+    def _nanobot_features_payload(self) -> dict[str, Any]:
+        return nanobot_features_payload(config_path=self.settings.config.path)
+
+    def _nanobot_features_action(
+        self,
+        action: str,
+        query: QueryParams,
+        *,
+        allow_install: bool = True,
+    ) -> dict[str, Any]:
+        return self.settings.mutate(
+            nanobot_features_action,
+            action,
+            query,
+            allow_install=allow_install,
+        )
 
     async def _handle_settings_nanobot_features_action(
         self,
@@ -742,7 +806,7 @@ class WebUISettingsRouter:
             return self._unauthorized()
         try:
             payload = await asyncio.to_thread(
-                nanobot_features_action,
+                self._nanobot_features_action,
                 action,
                 self._query(request),
                 allow_install=action != "enable"
@@ -850,7 +914,7 @@ class WebUISettingsRouter:
             saved = await asyncio.to_thread(
                 self._save_channel_config_values,
                 name,
-                self._parse_channel_values_header(request),
+                self._parse_channel_values(request),
                 instance_id,
             )
         except WebUISettingsError as e:
@@ -865,7 +929,7 @@ class WebUISettingsRouter:
             "saved_keys": saved,
         }
         if not enable:
-            features = await asyncio.to_thread(nanobot_features_payload)
+            features = await asyncio.to_thread(self._nanobot_features_payload)
             features = self._with_channel_runtime_status(features)
             payload["nanobot_features"] = self._with_restart_state(features, section="runtime")
             return self._json_response(payload)
@@ -876,7 +940,7 @@ class WebUISettingsRouter:
 
         try:
             features = await asyncio.to_thread(
-                nanobot_features_action,
+                self._nanobot_features_action,
                 "enable",
                 feature_query,
                 allow_install=self._allow_feature_package_install(connection, request),
@@ -906,7 +970,7 @@ class WebUISettingsRouter:
             payload = await asyncio.to_thread(
                 validate_channel_config,
                 name,
-                self._parse_channel_values_header(request),
+                self._parse_channel_values(request),
                 instance_id=instance_id,
             )
         except WebUISettingsError as e:
@@ -916,19 +980,14 @@ class WebUISettingsRouter:
             return self._error_response(500, "failed to validate channel settings")
         return self._json_response(payload)
 
-    def _parse_channel_values_header(self, request: WsRequest) -> dict[str, Any]:
-        raw = request.headers.get(_CHANNEL_VALUES_HEADER)
-        if not raw:
+    def _parse_channel_values(self, request: WsRequest) -> dict[str, Any]:
+        payload = _mutation_payload(request)
+        if payload is None or "values" not in payload:
             return {}
-        if len(raw.encode("utf-8")) > _CHANNEL_VALUES_HEADER_MAX_BYTES:
-            raise WebUISettingsError("channel settings payload is too large")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise WebUISettingsError("invalid channel settings payload") from exc
-        if not isinstance(payload, dict):
+        values = payload.get("values")
+        if not isinstance(values, dict):
             raise WebUISettingsError("channel settings payload must be a JSON object")
-        return cast(dict[str, Any], payload)
+        return cast(dict[str, Any], values)
 
     def _save_channel_config_values(
         self,
@@ -949,44 +1008,47 @@ class WebUISettingsRouter:
         if not raw_values:
             return []
 
-        config = load_config()
-        section = getattr(config.channels, name, None)
-        channel_config = channel_instance_config(
-            plugin,
-            section,
-            instance_id=instance_id,
-        )
-
-        saved: list[str] = []
-        prefix = f"channels.{name}."
-        for raw_key, raw_value in raw_values.items():
-            if not raw_key:
-                raise WebUISettingsError("channel settings payload contains an invalid key")
-            field = raw_key[len(prefix):] if raw_key.startswith(prefix) else raw_key
-            value_type = field_types.get(field)
-            if value_type is None:
-                raise WebUISettingsError(f"'{raw_key}' cannot be configured from WebUI")
-            value = self._coerce_channel_value(raw_key, raw_value, value_type)
-            if value is _SKIP_FIELD:
-                continue
-            self._assign_channel_config_value(channel_config, field, value)
-            saved.append(raw_key)
-
-        try:
-            updated_section = channel_update_instance_config(
+        def update(config: Config) -> list[str]:
+            section = getattr(config.channels, name, None)
+            channel_config = channel_instance_config(
                 plugin,
                 section,
-                channel_config,
                 instance_id=instance_id,
             )
-        except ValueError as exc:
-            raise WebUISettingsError(
-                f"Invalid {name} configuration: {exc}",
-                status=400,
-            ) from exc
-        setattr(config.channels, name, updated_section)
-        save_config(config)
-        return saved
+
+            saved: list[str] = []
+            prefix = f"channels.{name}."
+            for raw_key, raw_value in raw_values.items():
+                if not raw_key:
+                    raise WebUISettingsError(
+                        "channel settings payload contains an invalid key"
+                    )
+                field = raw_key[len(prefix):] if raw_key.startswith(prefix) else raw_key
+                value_type = field_types.get(field)
+                if value_type is None:
+                    raise WebUISettingsError(f"'{raw_key}' cannot be configured from WebUI")
+                value = self._coerce_channel_value(raw_key, raw_value, value_type)
+                if value is _SKIP_FIELD:
+                    continue
+                self._assign_channel_config_value(channel_config, field, value)
+                saved.append(raw_key)
+
+            try:
+                updated_section = channel_update_instance_config(
+                    plugin,
+                    section,
+                    channel_config,
+                    instance_id=instance_id,
+                )
+            except ValueError as exc:
+                raise WebUISettingsError(
+                    f"Invalid {name} configuration: {exc}",
+                    status=400,
+                ) from exc
+            setattr(config.channels, name, updated_section)
+            return saved
+
+        return self.settings.config.update(update)
 
     @staticmethod
     def _coerce_channel_value(
@@ -1109,14 +1171,14 @@ class WebUISettingsRouter:
             target["instance_id"] = [str(payload["instance_id"])]
         try:
             features = await asyncio.to_thread(
-                nanobot_features_action,
+                self._nanobot_features_action,
                 "enable",
                 target,
                 allow_install=self._allow_feature_package_install(connection, request),
             )
         except OptionalFeatureError as exc:
             features = self._feature_runtime_fallback(
-                nanobot_features_payload(),
+                self._nanobot_features_payload(),
                 message=(
                     f"{channel_name} connected, but enabling channel support failed: "
                     f"{exc.message}"
@@ -1137,7 +1199,9 @@ class WebUISettingsRouter:
         if _is_local_browser_request(connection, request.headers):
             return True
         try:
-            return bool(load_config().tools.webui_allow_remote_package_install)
+            return bool(
+                self.settings.config.load().tools.webui_allow_remote_package_install
+            )
         except Exception:
             self.logger.exception("failed to load remote package install policy")
             return False
@@ -1154,6 +1218,7 @@ class WebUISettingsRouter:
                 action,
                 self._parse_mcp_settings_query(request),
                 reload_mcp=lambda: request_mcp_reload(self.bus),
+                config=self.settings.config,
             )
         except Exception as e:
             status = getattr(e, "status", 500)

@@ -85,6 +85,10 @@ import {
 } from "@/components/settings/channels/ChannelSetupPanel";
 import { Button } from "@/components/ui/button";
 import {
+  ComboboxOption,
+  useComboboxNavigation,
+} from "@/components/ui/combobox";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -100,6 +104,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import { isLoopbackHost } from "@/lib/network";
 import {
@@ -135,7 +145,6 @@ import {
   updateModelConfiguration,
   updateNetworkSafetySettings,
   updateProviderSettings,
-  updateSettings,
   updateTranscriptionSettings,
   updateWebSearchSettings,
 } from "@/lib/api";
@@ -234,8 +243,6 @@ interface AgentSettingsDraft {
   temperature: number;
   reasoningEffort: string;
   timezone: string;
-  botName: string;
-  botIcon: string;
   toolHintMaxLength: number;
 }
 
@@ -269,6 +276,52 @@ type CustomMcpTransport = "stdio" | "streamableHttp" | "sse";
 
 const CONTEXT_WINDOW_TOKEN_OPTIONS = [65_536, 200_000, 262_144, 500_000, 1_048_576] as const;
 const OAUTH_PROXY_PROVIDERS = new Set(["openai_codex", "xai_grok"]);
+type ProviderRequestOption = {
+  kind: "priority" | "hosted_tool";
+  titleKey: string;
+  title: string;
+  helpKey: string;
+  help: string;
+  toolType?: "web_search" | "x_search";
+  defaultEnabled?: boolean;
+  forceResponses?: boolean;
+};
+const PROVIDER_REQUEST_OPTIONS: Partial<Record<string, ProviderRequestOption[]>> = {
+  openai_codex: [{
+    kind: "priority",
+    titleKey: "settings.providers.capabilityFastMode",
+    title: "Fast mode",
+    helpKey: "settings.providers.capabilityFastModeHelp",
+    help: "Use OpenAI's priority service tier for faster responses. This consumes credits faster.",
+  }],
+  openai: [{
+    kind: "hosted_tool",
+    titleKey: "settings.providers.capabilityOpenAISearch",
+    title: "OpenAI web search",
+    helpKey: "settings.providers.capabilityOpenAISearchHelp",
+    help: "Allow compatible Responses API models to search the web. Search activity appears in chat.",
+    toolType: "web_search",
+    forceResponses: true,
+  }],
+  deepseek: [{
+    kind: "hosted_tool",
+    titleKey: "settings.providers.capabilityDeepSeekSearch",
+    title: "DeepSeek web search",
+    helpKey: "settings.providers.capabilityDeepSeekSearchHelp",
+    help: "Let DeepSeek V4 Flash search the web through its Responses API. Search activity appears in chat.",
+    toolType: "web_search",
+    defaultEnabled: true,
+  }],
+  xai_grok: [{
+    kind: "hosted_tool",
+    titleKey: "settings.providers.capabilityXSearch",
+    title: "X Search",
+    helpKey: "settings.providers.capabilityXSearchHelp",
+    help: "Allow supported Grok models to use xAI-hosted X Search. Search activity appears in chat.",
+    toolType: "x_search",
+    defaultEnabled: true,
+  }],
+};
 const CUSTOM_PROVIDER_CREATION_KEY = "__custom_provider__";
 const CUSTOM_PROVIDER_ADVANCED_FIELDS: ProviderAdvancedField[] = [
   "extra_headers",
@@ -297,6 +350,70 @@ const DEFERRED_MODEL_LIST_PROVIDERS = new Set([
 
 function providerJsonValue(value: Record<string, unknown> | null | undefined): string {
   return value && Object.keys(value).length > 0 ? JSON.stringify(value, null, 2) : "";
+}
+
+function parseProviderExtraBody(value: string): Record<string, unknown> | null {
+  if (!value.trim()) return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isHostedSearchTool(tool: unknown, toolType: "web_search" | "x_search"): boolean {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return false;
+  const configuredType = (tool as Record<string, unknown>).type;
+  if (typeof configuredType !== "string") return false;
+  return configuredType === toolType
+    || (toolType === "web_search" && configuredType.startsWith("web_search_"));
+}
+
+function hasHostedSearchTool(value: unknown, toolType: "web_search" | "x_search"): boolean {
+  return Array.isArray(value) && value.some((tool) => isHostedSearchTool(tool, toolType));
+}
+
+function providerRequestOptionEnabled(
+  option: ProviderRequestOption,
+  extraBody: Record<string, unknown>,
+): boolean {
+  if (option.kind === "priority") return extraBody.service_tier === "priority";
+  if (Object.prototype.hasOwnProperty.call(extraBody, "tools")) {
+    return hasHostedSearchTool(extraBody.tools, option.toolType!);
+  }
+  return option.defaultEnabled === true;
+}
+
+function updateProviderRequestOption(
+  option: ProviderRequestOption,
+  enabled: boolean,
+  form: ProviderForm,
+): Partial<ProviderForm> {
+  const extraBody = { ...(parseProviderExtraBody(form.extraBody) ?? {}) };
+  if (option.kind === "priority") {
+    if (enabled) extraBody.service_tier = "priority";
+    else if (extraBody.service_tier === "priority") delete extraBody.service_tier;
+  } else {
+    const toolType = option.toolType!;
+    const tools = Array.isArray(extraBody.tools)
+      ? extraBody.tools.filter((tool) => !isHostedSearchTool(tool, toolType))
+      : [];
+    if (enabled) tools.push({ type: toolType });
+    if (tools.length || option.defaultEnabled) {
+      extraBody.tools = tools;
+    } else {
+      delete extraBody.tools;
+    }
+  }
+  return {
+    extraBody: providerJsonValue(extraBody),
+    ...(option.forceResponses && enabled
+      ? { apiType: "responses" as const }
+      : {}),
+  };
 }
 
 function providerFormFromRow(
@@ -341,30 +458,6 @@ const SETTINGS_SEARCH_INPUT_CLASS = cn(
   "focus-visible:border-border/70 focus-visible:bg-background",
   "focus-visible:ring-0 focus-visible:ring-offset-0",
 );
-
-const FALLBACK_TIMEZONES = [
-  "UTC",
-  "Asia/Shanghai",
-  "Asia/Hong_Kong",
-  "Asia/Tokyo",
-  "Asia/Seoul",
-  "Asia/Singapore",
-  "Asia/Taipei",
-  "Asia/Dubai",
-  "Asia/Kolkata",
-  "Europe/London",
-  "Europe/Paris",
-  "Europe/Berlin",
-  "Europe/Amsterdam",
-  "America/New_York",
-  "America/Chicago",
-  "America/Denver",
-  "America/Los_Angeles",
-  "America/Toronto",
-  "America/Sao_Paulo",
-  "Australia/Sydney",
-  "Pacific/Auckland",
-];
 
 interface CustomMcpForm {
   name: string;
@@ -419,7 +512,6 @@ interface SettingsViewProps {
   onModelNameChange: (modelName: string | null) => void;
   onSettingsChange?: (payload: SettingsPayload) => void;
   skills?: SkillSummary[];
-  onWorkspaceSettingsChange?: () => void | Promise<void>;
   onSectionChange?: (section: SettingsSectionKey) => void;
   onLogout?: () => void;
   onRestart?: () => void;
@@ -475,8 +567,6 @@ const DEFAULT_AGENT_SETTINGS_DRAFT: AgentSettingsDraft = {
   temperature: 0.1,
   reasoningEffort: "",
   timezone: "UTC",
-  botName: "nanobot",
-  botIcon: "",
   toolHintMaxLength: 40,
 };
 
@@ -544,8 +634,6 @@ function agentDraftFromPayload(
     temperature: activePreset?.temperature ?? payload.agent.temperature,
     reasoningEffort: activePreset?.reasoning_effort ?? "",
     timezone: payload.agent.timezone,
-    botName: payload.agent.bot_name,
-    botIcon: payload.agent.bot_icon,
     toolHintMaxLength: payload.agent.tool_hint_max_length,
   };
 }
@@ -628,7 +716,6 @@ export function SettingsView({
   onModelNameChange,
   onSettingsChange,
   skills = [],
-  onWorkspaceSettingsChange,
   onSectionChange,
   onLogout,
   onRestart,
@@ -637,7 +724,7 @@ export function SettingsView({
   hostChromeInset = false,
 }: SettingsViewProps) {
   const { t } = useTranslation();
-  const { getToken, token } = useClient();
+  const { client, getToken, token } = useClient();
   const pageVisible = usePageVisibility();
   const remoteBrowserAccess =
     typeof window !== "undefined" && !isLoopbackHost(window.location.hostname);
@@ -785,7 +872,7 @@ export function SettingsView({
     const poll = async () => {
       try {
         const payload = await completeProviderOAuth(
-          getToken(),
+          client,
           providerOAuthFlow.provider,
           providerOAuthFlow.flow_id,
         );
@@ -815,7 +902,7 @@ export function SettingsView({
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [applyPayload, closeProviderOAuthFlow, getToken, providerOAuthFlow]);
+  }, [applyPayload, client, closeProviderOAuthFlow, providerOAuthFlow]);
 
   useEffect(() => {
     if (!initialSettings || settings !== null) return;
@@ -838,7 +925,9 @@ export function SettingsView({
         if (!cancelled && showLoading) setError((err as Error).message);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -1079,15 +1168,6 @@ export function SettingsView({
     );
   }, [form, settings]);
 
-  const runtimeDirty = useMemo(() => {
-    if (!settings) return false;
-    return (
-      form.timezone !== settings.agent.timezone ||
-      form.botName !== settings.agent.bot_name ||
-      form.botIcon !== settings.agent.bot_icon
-    );
-  }, [form, settings]);
-
   const imageGenerationDirty = useMemo(() => {
     if (!settings) return false;
     return (
@@ -1221,7 +1301,7 @@ export function SettingsView({
       }
       setModelConfigurationSaving(true);
       try {
-        const payload = await createModelConfiguration(token, {
+        const payload = await createModelConfiguration(client, {
           label,
           provider,
           model,
@@ -1239,7 +1319,7 @@ export function SettingsView({
 
         let finalPayload = payload;
         if (nextOrder) {
-          const orderedPayload = await updateModelCallOrder(token, nextOrder);
+          const orderedPayload = await updateModelCallOrder(client, nextOrder);
           applyPayload(orderedPayload);
           finalPayload = orderedPayload;
         }
@@ -1265,7 +1345,7 @@ export function SettingsView({
     const reasoningEffort = form.reasoningEffort || null;
     setSaving(true);
     try {
-      const payload = await updateModelConfiguration(token, {
+      const payload = await updateModelConfiguration(client, {
         name: selectedPreset.name,
         label:
           form.presetLabel.trim() !== selectedPreset.label
@@ -1351,7 +1431,7 @@ export function SettingsView({
     setModelCallOrder(nextOrder);
     setModelCallOrderSaving(true);
     try {
-      const payload = await updateModelCallOrder(token, nextOrder);
+      const payload = await updateModelCallOrder(client, nextOrder);
       applyPayload(payload, { preserveAgentForm: true });
       onModelNameChange(payload.agent.model || null);
       setError(null);
@@ -1367,7 +1447,7 @@ export function SettingsView({
     if (modelMigrationSaving) return;
     setModelMigrationSaving(true);
     try {
-      const payload = await migrateModelConfigurations(token);
+      const payload = await migrateModelConfigurations(client);
       applyPayload(payload);
       onModelNameChange(payload.agent.model || null);
       setError(null);
@@ -1389,32 +1469,9 @@ export function SettingsView({
     }
     setSaving(true);
     try {
-      const payload = await deleteModelConfiguration(token, modelPresetPendingDelete.name);
+      const payload = await deleteModelConfiguration(client, modelPresetPendingDelete.name);
       applyPayload(payload);
       setModelPresetPendingDelete(null);
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const saveRuntimeSettings = async () => {
-    if (!settings || !runtimeDirty || saving) return;
-    setSaving(true);
-    try {
-      const payload = await updateSettings(token, {
-        timezone: form.timezone,
-        botName: form.botName,
-        botIcon: form.botIcon,
-      });
-      applyPayload(payload);
-      if (payload.requires_restart) {
-        setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
-      }
-      await onWorkspaceSettingsChange?.();
-      await maybeRestartHostEngine(payload);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -1427,7 +1484,7 @@ export function SettingsView({
     if (!settings || !imageGenerationDirty || imageGenerationSaving) return;
     setImageGenerationSaving(true);
     try {
-      const payload = await updateImageGenerationSettings(token, imageGenerationForm);
+      const payload = await updateImageGenerationSettings(client, imageGenerationForm);
       applyPayload(payload);
       if (payload.requires_restart) {
         setPendingRestartSections((prev) => ({ ...prev, image: true }));
@@ -1445,7 +1502,7 @@ export function SettingsView({
     if (!settings || !transcriptionDirty || transcriptionSaving) return;
     setTranscriptionSaving(true);
     try {
-      const payload = await updateTranscriptionSettings(token, transcriptionForm);
+      const payload = await updateTranscriptionSettings(client, transcriptionForm);
       applyPayload(payload);
       if (payload.requires_restart) {
         setPendingRestartSections((prev) => ({ ...prev, browser: true }));
@@ -1463,7 +1520,7 @@ export function SettingsView({
     if (!settings || !networkSafetyDirty || networkSafetySaving) return;
     setNetworkSafetySaving(true);
     try {
-      const payload = await updateNetworkSafetySettings(token, networkSafetyForm);
+      const payload = await updateNetworkSafetySettings(client, networkSafetyForm);
       applyPayload(payload);
       if (payload.requires_restart) {
         setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
@@ -1487,7 +1544,7 @@ export function SettingsView({
     try {
       let latest = nanobotFeatures;
       for (const name of missing) {
-        latest = await enableNanobotFeature(token, name);
+        latest = await enableNanobotFeature(client, name);
         if (latest.requires_restart) {
           setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
         }
@@ -1511,8 +1568,8 @@ export function SettingsView({
     setApiServiceError(null);
     try {
       const payload = action === "start"
-        ? await startApiService(token, values!)
-        : await stopApiService(token);
+        ? await startApiService(client, values!)
+        : await stopApiService(client);
       setApiService(payload);
       const refreshed = await fetchNanobotFeatures(token);
       setNanobotFeatures(refreshed);
@@ -1565,7 +1622,7 @@ export function SettingsView({
         if (field === "region") update.region = providerForm.region.trim();
         if (field === "profile") update.profile = providerForm.profile.trim();
       }
-      const payload = await updateProviderSettings(token, update);
+      const payload = await updateProviderSettings(client, update);
       applyPayload(payload);
       if (payload.requires_restart) {
         setPendingRestartSections((prev) => ({ ...prev, image: true }));
@@ -1599,7 +1656,7 @@ export function SettingsView({
     if (providerSaving) return false;
     setProviderSaving(CUSTOM_PROVIDER_CREATION_KEY);
     try {
-      const payload = await createProviderSettings(token, {
+      const payload = await createProviderSettings(client, {
         name: draft.name.trim(),
         apiKey: draft.apiKey.trim() || undefined,
         apiBase: draft.apiBase.trim(),
@@ -1641,12 +1698,11 @@ export function SettingsView({
       const payload =
         action === "login"
           ? await loginProviderOAuth(
-              token,
+              client,
               providerName,
-              "",
               providerName === "openai_codex" && remoteBrowserAccess,
             )
-          : await logoutProviderOAuth(token, providerName);
+          : await logoutProviderOAuth(client, providerName);
       if (isProviderOAuthAuthorizationRequired(payload)) {
         try {
           if (popup && !popup.closed) popup.location.href = payload.authorization_url;
@@ -1682,7 +1738,7 @@ export function SettingsView({
     setProviderOAuthDialogError(null);
     try {
       const payload = await completeProviderOAuth(
-        token,
+        client,
         flow.provider,
         flow.flow_id,
         authorizationResponse,
@@ -1741,7 +1797,7 @@ export function SettingsView({
         update.apiKey = apiKey;
       }
       if (provider.credential === "base_url") update.baseUrl = baseUrl;
-      const payload = await updateWebSearchSettings(token, update);
+      const payload = await updateWebSearchSettings(client, update);
       applyPayload(payload);
       if (payload.requires_restart || webFetchRestartRequired) {
         setPendingRestartSections((prev) => ({ ...prev, browser: true }));
@@ -1846,7 +1902,7 @@ export function SettingsView({
     setCliAppsMessage(null);
     setCliAppsError(null);
     try {
-      const payload = await runCliAppAction(token, action, name);
+      const payload = await runCliAppAction(client, action, name);
       setCliApps(payload);
       if (action !== "test") {
         notifyCliAppsChanged(payload);
@@ -1877,8 +1933,8 @@ export function SettingsView({
     setNanobotFeaturesError(null);
     try {
       const payload = action === "enable"
-        ? await enableNanobotFeature(token, name)
-        : await disableNanobotFeature(token, name);
+        ? await enableNanobotFeature(client, name)
+        : await disableNanobotFeature(client, name);
       setNanobotFeatures(payload);
       if (payload.requires_restart) {
         setPendingRestartSections((prev) => ({ ...prev, runtime: true }));
@@ -1898,7 +1954,7 @@ export function SettingsView({
     setAutomationAction(key);
     setAutomationsError(null);
     try {
-      const payload = await runAutomationAction(token, action, job.id);
+      const payload = await runAutomationAction(client, action, job.id);
       setAutomations(payload);
       if (action === "delete") setAutomationPendingDelete(null);
       if (action === "run") {
@@ -1920,7 +1976,7 @@ export function SettingsView({
     setAutomationAction(key);
     setAutomationsError(null);
     try {
-      const payload = await updateAutomation(token, job.id, values);
+      const payload = await updateAutomation(client, job.id, values);
       setAutomations(payload);
       setAutomationPendingEdit(null);
     } catch (err) {
@@ -1940,7 +1996,7 @@ export function SettingsView({
     setMcpMessage(null);
     setMcpError(null);
     try {
-      const payload = await runMcpPresetAction(token, action, name, values);
+      const payload = await runMcpPresetAction(client, action, name, values);
       setMcpPresets(payload);
       setMcpMessage(payload.last_action?.message ?? null);
       if (action !== "test") {
@@ -1967,7 +2023,7 @@ export function SettingsView({
     setMcpMessage(null);
     setMcpError(null);
     try {
-      const payload = await saveCustomMcpServer(token, {
+      const payload = await saveCustomMcpServer(client, {
         name,
         transport: customMcpForm.transport,
         command: customMcpForm.command,
@@ -1997,7 +2053,7 @@ export function SettingsView({
     setMcpMessage(null);
     setMcpError(null);
     try {
-      const payload = await importMcpConfig(token, mcpConfigImport);
+      const payload = await importMcpConfig(client, mcpConfigImport);
       setMcpPresets(payload);
       setMcpMessage(payload.last_action?.message ?? null);
       notifyMcpPresetsChanged(payload);
@@ -2018,7 +2074,7 @@ export function SettingsView({
     setMcpMessage(null);
     setMcpError(null);
     try {
-      const payload = await updateMcpServerTools(token, name, enabledTools);
+      const payload = await updateMcpServerTools(client, name, enabledTools);
       setMcpPresets(payload);
       setMcpMessage(payload.last_action?.message ?? null);
       notifyMcpPresetsChanged(payload);
@@ -2271,6 +2327,7 @@ export function SettingsView({
             onAction={handleAutomationAction}
             onRequestEdit={setAutomationPendingEdit}
             onRequestDelete={setAutomationPendingDelete}
+            onBackToChat={onBackToChat}
           />
         );
       case "skills":
@@ -2279,11 +2336,7 @@ export function SettingsView({
         return (
           <RuntimeSettings
             form={form}
-            setForm={setForm}
             settings={settings}
-            dirty={runtimeDirty}
-            saving={saving}
-            onSave={saveRuntimeSettings}
             onRestart={restartViaSettingsSurface}
             isRestarting={isRestarting || hostEngineApplying}
             requiresRestartPending={pendingRestartSections.runtime}
@@ -2395,7 +2448,7 @@ export function SettingsView({
         onSave={handleAutomationEdit}
       />
 
-      <main
+      <div
         className={cn(
           "min-w-0 flex-1 bg-settings-canvas [scrollbar-gutter:stable]",
           activeSection === "channels" ? "overflow-y-auto xl:overflow-hidden" : "overflow-y-auto",
@@ -2459,7 +2512,7 @@ export function SettingsView({
             </div>
           ) : null}
         </div>
-      </main>
+      </div>
     </div>
   );
 }
@@ -2525,9 +2578,9 @@ function SettingsSidebar({
         {t("settings.backToChat")}
       </button>
       <div className="mb-3 px-1 lg:mb-4 lg:px-2">
-        <h2 className="text-[18px] font-normal tracking-normal text-foreground">
+        <h1 className="text-[18px] font-normal tracking-normal text-foreground">
           {t("settings.sidebar.title")}
-        </h2>
+        </h1>
       </div>
 
       <nav
@@ -2549,7 +2602,7 @@ function SettingsSidebar({
           <DropdownMenuContent
             align="start"
             sideOffset={6}
-            className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)] rounded-[16px] p-1.5"
+            className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)]"
           >
             {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
               const active = key === activeSection;
@@ -2559,7 +2612,7 @@ function SettingsSidebar({
                   aria-current={active ? "page" : undefined}
                   onSelect={() => onSelectSection(key)}
                   className={cn(
-                    "flex h-10 cursor-default items-center gap-2.5 rounded-[11px] px-2.5 text-[13px] font-medium",
+                    "flex h-10 cursor-default items-center gap-2.5 px-2.5 text-[13px] font-medium",
                     active && "bg-sidebar-accent text-foreground focus:bg-sidebar-accent",
                   )}
                 >
@@ -2905,10 +2958,7 @@ function AppearanceSettings({
       <section>
         <SettingsSectionTitle>{t("settings.sections.interface")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={t("settings.rows.theme")}
-            description={t("settings.help.theme")}
-          >
+          <SettingsRow title={t("settings.rows.theme")}>
             <button
               type="button"
               onClick={onToggleTheme}
@@ -2935,10 +2985,7 @@ function AppearanceSettings({
             </button>
           </SettingsRow>
 
-          <SettingsRow
-            title={t("settings.rows.language")}
-            description={t("settings.help.language")}
-          >
+          <SettingsRow title={t("settings.rows.language")}>
             <LanguageSwitcher />
           </SettingsRow>
         </SettingsGroup>
@@ -2947,10 +2994,7 @@ function AppearanceSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.localPreferences", "Local preferences")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.density", "Density")}
-            description={tx("settings.help.density", "Stored only in this browser.")}
-          >
+          <SettingsRow title={tx("settings.rows.density", "Density")}>
             <SegmentedControl
               value={localPrefs.density}
               options={[
@@ -2962,10 +3006,7 @@ function AppearanceSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.activityMode", "Activity detail")}
-            description={tx("settings.help.activityMode", "Choose how much agent activity chrome to show by default.")}
-          >
+          <SettingsRow title={tx("settings.rows.activityMode", "Activity detail")}>
             <SegmentedControl
               value={localPrefs.activityMode}
               options={[
@@ -2977,10 +3018,7 @@ function AppearanceSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.fileEditDisplay", "File edit display")}
-            description={tx("settings.help.fileEditDisplay", "Choose whether file edit activity opens as line counts or a diff.")}
-          >
+          <SettingsRow title={tx("settings.rows.fileEditDisplay", "File edit display")}>
             <SegmentedControl
               value={localPrefs.fileEditDisplayMode}
               options={[
@@ -2996,10 +3034,7 @@ function AppearanceSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.codeWrap", "Code wrapping")}
-            description={tx("settings.help.codeWrap", "Keep long code lines readable on smaller screens.")}
-          >
+          <SettingsRow title={tx("settings.rows.codeWrap", "Code wrapping")}>
             <ToggleButton
               checked={localPrefs.codeWrap}
               onChange={(codeWrap) => onChangeLocalPrefs((prev) => ({ ...prev, codeWrap }))}
@@ -3009,7 +3044,10 @@ function AppearanceSettings({
           </SettingsRow>
           <SettingsRow
             title={tx("settings.rows.brandLogos", "Brand logos")}
-            description={tx("settings.help.brandLogos", "Show third-party provider and CLI logos in Settings.")}
+            description={tx(
+              "settings.legal.thirdPartyBrands",
+              "Product names, logos, and brands are property of their respective owners. Use is for identification only and does not imply endorsement.",
+            )}
           >
             <ToggleButton
               checked={localPrefs.brandLogos}
@@ -3280,6 +3318,7 @@ function ModelsSettings({
   const tx = (key: string, fallback: string, values?: Record<string, unknown>) =>
     t(key, { defaultValue: fallback, ...(values ?? {}) });
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editorRowKey, setEditorRowKey] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [draggedCallOrderIndex, setDraggedCallOrderIndex] = useState<number | null>(null);
   const [dragOverCallOrderIndex, setDragOverCallOrderIndex] = useState<number | null>(null);
@@ -3306,6 +3345,10 @@ function ModelsSettings({
     })),
   ];
   const selectedPreset = namedPresetsByName.get(form.modelPreset) ?? null;
+  const activeEditorRowKey =
+    editorRowKey ??
+    presetRows.find((row) => row.name === selectedPreset?.name)?.key ??
+    null;
   useEffect(() => {
     setAdvancedOpen(false);
   }, [editorOpen, selectedPreset?.name]);
@@ -3339,11 +3382,15 @@ function ModelsSettings({
     form.temperature < 0 ||
     form.temperature > 2;
   const selectedPresetReferenced = Boolean(
-    selectedPreset && (settings.model_call_order ?? []).includes(selectedPreset.name),
+    selectedPreset && callOrder.includes(selectedPreset.name),
   );
   const callOrderBusy = orderSaving || saving;
-  const selectPreset = (preset: SettingsPayload["model_presets"][number]) => {
-    const toggleCurrentPreset = !creating && selectedPreset?.name === preset.name;
+  const selectPreset = (
+    preset: SettingsPayload["model_presets"][number],
+    rowKey: string,
+  ) => {
+    const toggleCurrentPreset =
+      !creating && selectedPreset?.name === preset.name && activeEditorRowKey === rowKey;
     onSelectConfiguration();
     if (toggleCurrentPreset) {
       setEditorOpen((open) => !open);
@@ -3360,6 +3407,7 @@ function ModelsSettings({
       temperature: preset.temperature,
       reasoningEffort: preset.reasoning_effort ?? "",
     }));
+    setEditorRowKey(rowKey);
     setEditorOpen(true);
   };
 
@@ -3399,6 +3447,184 @@ function ModelsSettings({
     setDragOverCallOrderIndex(null);
     onChangeCallOrder(next);
   };
+
+  const renderPresetEditor = () => (
+    <div
+      id="model-preset-editor"
+      data-testid="model-preset-editor"
+      className="mx-3 mb-3 divide-y divide-border/45 overflow-hidden rounded-[18px] border border-border/45 bg-background/80 shadow-sm motion-reduce:animate-none animate-in fade-in-0 slide-in-from-top-1 duration-200 sm:mx-5 lg:mx-auto lg:w-[calc(100%-2.5rem)] lg:max-w-6xl"
+    >
+      {creating ? (
+        <div className="flex min-h-[52px] items-center px-4 py-3 sm:px-5">
+          <span className="text-[13px] font-semibold text-foreground/85">
+            {tx("settings.models.newPreset", "New model preset")}
+          </span>
+        </div>
+      ) : null}
+      <SettingsRow title={tx("settings.models.presetName", "Preset name")}>
+        <Input
+          autoFocus={creating}
+          value={form.presetLabel}
+          placeholder={tx("settings.models.presetNamePlaceholder", "Fast writing")}
+          onChange={(event) =>
+            setForm((prev) => ({ ...prev, presetLabel: event.target.value }))
+          }
+          className="h-8 w-[min(280px,70vw)] rounded-full text-[13px]"
+        />
+      </SettingsRow>
+      <SettingsRow title={t("settings.rows.provider")}>
+        <ProviderPicker
+          providers={providerOptions}
+          value={providerValue}
+          emptyLabel={t("settings.byok.noConfiguredProviders")}
+          showProviderLogos={showBrandLogos}
+          onChange={(provider) =>
+            setForm((prev) => ({
+              ...prev,
+              provider,
+              model: provider === prev.provider ? prev.model : "",
+            }))
+          }
+        />
+      </SettingsRow>
+      {selectedProviderNeedsSignIn ? (
+        <SettingsRow
+          title={tx("settings.oauth.signInRequired", "Sign in required")}
+          description={tx(
+            "settings.oauth.signInBeforeSaving",
+            "Sign in before saving this provider in the preset.",
+          )}
+        >
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => selectedProvider && onProviderOAuthLogin(selectedProvider.name)}
+            disabled={!selectedProvider?.oauth_login_supported || selectedProviderSigningIn}
+            className="rounded-full"
+          >
+            {selectedProviderSigningIn ? (
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : null}
+            {selectedProviderSigningIn
+              ? tx("settings.oauth.signingIn", "Signing in...")
+              : tx("settings.oauth.signIn", "Sign in")}
+          </Button>
+        </SettingsRow>
+      ) : null}
+      <SettingsRow title={t("settings.rows.model")}>
+        <ModelIdPicker
+          token={token}
+          settings={settings}
+          provider={form.provider}
+          value={form.model}
+          showProviderLogos={showBrandLogos}
+          onChange={(model) => setForm((prev) => ({ ...prev, model }))}
+        />
+      </SettingsRow>
+      <button
+        type="button"
+        aria-expanded={advancedOpen}
+        onClick={() => setAdvancedOpen((value) => !value)}
+        className="flex min-h-[62px] w-full items-center justify-between gap-4 px-4 py-3.5 text-left transition-colors hover:bg-muted/30 sm:px-5"
+      >
+        <span>
+          <span className="block text-[14px] font-medium text-foreground">
+            {tx("settings.models.advancedOptions", "Advanced options")}
+          </span>
+          <span className="mt-0.5 block text-[12px] text-muted-foreground">
+            {tx(
+              "settings.models.advancedSummary",
+              "Context {{context}} · Max {{max}} tokens",
+              {
+                context: formatModelContextWindow(form.contextWindowTokens),
+                max: formatContextWindow(form.maxTokens),
+              },
+            )}
+          </span>
+        </span>
+        <ChevronDown
+          className={cn(
+            "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+            advancedOpen && "rotate-180",
+          )}
+          aria-hidden
+        />
+      </button>
+      {advancedOpen ? (
+        <div className="bg-muted/12 px-4 py-4 sm:px-5">
+          <ModelAdvancedFields
+            maxTokens={form.maxTokens}
+            contextWindowTokens={form.contextWindowTokens}
+            temperature={form.temperature}
+            reasoningEffort={form.reasoningEffort}
+            onChange={(value) => setForm((prev) => ({ ...prev, ...value }))}
+          />
+        </div>
+      ) : null}
+      <div className="flex min-h-[58px] flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        {creating ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="self-start rounded-full text-muted-foreground"
+            disabled={creatingSaving}
+            onClick={() => {
+              setEditorOpen(false);
+              onCancelCreate();
+            }}
+          >
+            {tx("settings.actions.cancel", "Cancel")}
+          </Button>
+        ) : selectedPreset ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="rounded-full text-muted-foreground hover:text-destructive"
+              disabled={selectedPresetReferenced || saving || orderSaving}
+              aria-describedby={
+                selectedPresetReferenced ? "model-preset-delete-hint" : undefined
+              }
+              onClick={() => onDeleteConfiguration(selectedPreset)}
+            >
+              <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+              {tx("settings.actions.delete", "Delete")}
+            </Button>
+            {selectedPresetReferenced ? (
+              <span
+                id="model-preset-delete-hint"
+                className="text-[11px] leading-4 text-muted-foreground"
+              >
+                {tx(
+                  "settings.models.removeBeforeDelete",
+                  "Remove this preset from the call order before deleting it.",
+                )}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="flex items-center justify-end gap-3">
+          <Button
+            size="sm"
+            variant="outline"
+            className="rounded-full"
+            disabled={
+              (!creating && !dirty) ||
+              !selectedProviderConfigured ||
+              modelFieldsMissing ||
+              saving ||
+              orderSaving
+            }
+            onClick={onSave}
+          >
+            {saving || creatingSaving
+              ? tx("settings.actions.saving", "Saving...")
+              : tx("settings.actions.savePreset", "Save preset")}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="space-y-7">
@@ -3463,10 +3689,13 @@ function ModelsSettings({
                     isDropTarget &&
                     draggedCallOrderIndex !== null &&
                     draggedCallOrderIndex < orderIndex;
-                  return (
+                  const isSelected =
+                    editorOpen &&
+                    !creating &&
+                    activeEditorRowKey === key &&
+                    selectedPreset?.name === name;
+                  const presetRow = (
                     <div
-                      key={key}
-                      role="listitem"
                       tabIndex={ordered ? 0 : -1}
                       draggable={ordered && !callOrderBusy}
                       aria-label={
@@ -3518,7 +3747,7 @@ function ModelsSettings({
                           moveCallOrderItem(orderIndex, 1);
                         } else if ((event.key === "Enter" || event.key === " ") && preset) {
                           event.preventDefault();
-                          selectPreset(preset);
+                          selectPreset(preset, key);
                         }
                       }}
                       className={cn(
@@ -3535,6 +3764,7 @@ function ModelsSettings({
                           dropAfterTarget &&
                           "after:absolute after:inset-x-4 after:bottom-0 after:z-10 after:h-0.5 after:rounded-full after:bg-foreground sm:after:inset-x-5",
                         ordered && draggedCallOrderIndex === orderIndex && "opacity-35",
+                        isSelected && "bg-muted/45 hover:bg-muted/45",
                         "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                       )}
                     >
@@ -3549,9 +3779,10 @@ function ModelsSettings({
                       <button
                         type="button"
                         aria-pressed={selectedPreset?.name === name}
-                        aria-expanded={selectedPreset?.name === name && editorOpen}
+                        aria-expanded={isSelected}
+                        aria-controls={isSelected ? "model-preset-editor" : undefined}
                         disabled={!preset}
-                        onClick={() => preset && selectPreset(preset)}
+                        onClick={() => preset && selectPreset(preset, key)}
                         className="flex min-w-0 flex-1 items-center gap-3 rounded-[12px] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         {ordered ? (
@@ -3596,7 +3827,7 @@ function ModelsSettings({
                         <ChevronRight
                           className={cn(
                             "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
-                            selectedPreset?.name === name && editorOpen && "rotate-90",
+                            isSelected && "rotate-90",
                           )}
                           aria-hidden
                         />
@@ -3633,6 +3864,12 @@ function ModelsSettings({
                       </button>
                     </div>
                   );
+                  return (
+                    <div key={key} role="listitem">
+                      {presetRow}
+                      {isSelected ? renderPresetEditor() : null}
+                    </div>
+                  );
                 })}
               </div>
               <div className="flex min-h-[58px] flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -3643,6 +3880,7 @@ function ModelsSettings({
                     className="rounded-full"
                     disabled={callOrderBusy}
                     onClick={() => {
+                      setEditorRowKey(null);
                       setEditorOpen(true);
                       onBeginCreate();
                     }}
@@ -3662,174 +3900,9 @@ function ModelsSettings({
                   </SettingsStatusMessage>
                 ) : null}
               </div>
+              {creating && editorOpen ? renderPresetEditor() : null}
             </>
           )}
-
-      {editorOpen && (selectedPreset || creating) ? (
-        <>
-            <div className="flex min-h-[52px] items-center justify-between gap-3 bg-muted/15 px-4 py-3 sm:px-5">
-              <span className="text-[13px] font-semibold text-foreground/85">
-                {creating
-                  ? tx("settings.models.newPreset", "New model preset")
-                  : tx("settings.models.editPreset", "Edit preset")}
-              </span>
-            </div>
-            <SettingsRow title={tx("settings.models.presetName", "Preset name")}>
-              <Input
-                autoFocus={creating}
-                value={form.presetLabel}
-                placeholder={tx("settings.models.presetNamePlaceholder", "Fast writing")}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, presetLabel: event.target.value }))
-                }
-                className="h-8 w-[min(280px,70vw)] rounded-full text-[13px]"
-              />
-            </SettingsRow>
-            <SettingsRow title={t("settings.rows.provider")}>
-              <ProviderPicker
-                providers={providerOptions}
-                value={providerValue}
-                emptyLabel={t("settings.byok.noConfiguredProviders")}
-                showProviderLogos={showBrandLogos}
-                onChange={(provider) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    provider,
-                    model: provider === prev.provider ? prev.model : "",
-                  }))
-                }
-              />
-            </SettingsRow>
-            {selectedProviderNeedsSignIn ? (
-              <SettingsRow
-                title={tx("settings.oauth.signInRequired", "Sign in required")}
-                description={tx(
-                  "settings.oauth.signInBeforeSaving",
-                  "Sign in before saving this provider in the preset.",
-                )}
-              >
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => selectedProvider && onProviderOAuthLogin(selectedProvider.name)}
-                  disabled={!selectedProvider?.oauth_login_supported || selectedProviderSigningIn}
-                  className="rounded-full"
-                >
-                  {selectedProviderSigningIn ? (
-                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
-                  ) : null}
-                  {selectedProviderSigningIn
-                    ? tx("settings.oauth.signingIn", "Signing in...")
-                    : tx("settings.oauth.signIn", "Sign in")}
-                </Button>
-              </SettingsRow>
-            ) : null}
-            <SettingsRow title={t("settings.rows.model")}>
-              <ModelIdPicker
-                token={token}
-                settings={settings}
-                provider={form.provider}
-                value={form.model}
-                showProviderLogos={showBrandLogos}
-                onChange={(model) => setForm((prev) => ({ ...prev, model }))}
-              />
-            </SettingsRow>
-            <button
-              type="button"
-              aria-expanded={advancedOpen}
-              onClick={() => setAdvancedOpen((value) => !value)}
-              className="flex min-h-[62px] w-full items-center justify-between gap-4 px-4 py-3.5 text-left transition-colors hover:bg-muted/30 sm:px-5"
-            >
-              <span>
-                <span className="block text-[14px] font-medium text-foreground">
-                  {tx("settings.models.advancedOptions", "Advanced options")}
-                </span>
-                <span className="mt-0.5 block text-[12px] text-muted-foreground">
-                  {tx(
-                    "settings.models.advancedSummary",
-                    "Context {{context}} · Max {{max}} tokens",
-                    {
-                      context: formatModelContextWindow(form.contextWindowTokens),
-                      max: formatContextWindow(form.maxTokens),
-                    },
-                  )}
-                </span>
-              </span>
-              <ChevronDown
-                className={cn(
-                  "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
-                  advancedOpen && "rotate-180",
-                )}
-                aria-hidden
-              />
-            </button>
-            {advancedOpen ? (
-              <div className="bg-muted/12 px-4 py-4 sm:px-5">
-                <ModelAdvancedFields
-                  maxTokens={form.maxTokens}
-                  contextWindowTokens={form.contextWindowTokens}
-                  temperature={form.temperature}
-                  reasoningEffort={form.reasoningEffort}
-                  onChange={(value) => setForm((prev) => ({ ...prev, ...value }))}
-                />
-              </div>
-            ) : null}
-            <div className="flex min-h-[58px] flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-              {creating ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="self-start rounded-full text-muted-foreground"
-                  disabled={creatingSaving}
-                  onClick={() => {
-                    setEditorOpen(false);
-                    onCancelCreate();
-                  }}
-                >
-                  {tx("settings.actions.cancel", "Cancel")}
-                </Button>
-              ) : selectedPreset ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="self-start rounded-full text-muted-foreground hover:text-destructive"
-                  disabled={selectedPresetReferenced || saving || orderSaving}
-                  title={
-                    selectedPresetReferenced
-                      ? tx(
-                          "settings.models.removeBeforeDelete",
-                          "Remove this preset from the call order before deleting it.",
-                        )
-                      : undefined
-                  }
-                  onClick={() => onDeleteConfiguration(selectedPreset)}
-                >
-                  <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-                  {tx("settings.actions.delete", "Delete")}
-                </Button>
-              ) : null}
-              <div className="flex items-center justify-end gap-3">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  disabled={
-                    (!creating && !dirty) ||
-                    !selectedProviderConfigured ||
-                    modelFieldsMissing ||
-                    saving ||
-                    orderSaving
-                  }
-                  onClick={onSave}
-                >
-                  {saving || creatingSaving
-                    ? tx("settings.actions.saving", "Saving...")
-                    : tx("settings.actions.savePreset", "Save preset")}
-                </Button>
-              </div>
-            </div>
-          </>
-      ) : null}
         </SettingsGroup>
       </section>
     </div>
@@ -3926,6 +3999,62 @@ function ModelAdvancedFields({
           className="h-9 rounded-[12px] text-[13px]"
         />
       </label>
+    </div>
+  );
+}
+
+function ProviderRequestOptions({
+  providerName,
+  form,
+  onChange,
+}: {
+  providerName: string;
+  form: ProviderForm;
+  onChange: (value: Partial<ProviderForm>) => void;
+}) {
+  const { t } = useTranslation();
+  const options = PROVIDER_REQUEST_OPTIONS[providerName] ?? [];
+  if (options.length === 0) return null;
+  const extraBody = parseProviderExtraBody(form.extraBody) ?? {};
+
+  const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
+
+  return (
+    <div className="overflow-hidden rounded-[18px] border border-border/45 bg-background/75">
+      {options.map((option, index) => {
+        const title = tx(option.titleKey, option.title);
+        const Icon = option.kind === "priority" ? Zap : Globe2;
+        const checked = providerRequestOptionEnabled(option, extraBody);
+        return (
+          <div
+            key={option.titleKey}
+            className={cn(
+              "flex items-center justify-between gap-4 px-4 py-3",
+              index > 0 && "border-t border-border/45",
+            )}
+          >
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground">
+                <Icon className="h-4 w-4" aria-hidden />
+              </span>
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold text-foreground">{title}</p>
+                <p className="mt-0.5 text-[12px] leading-5 text-muted-foreground">
+                  {tx(option.helpKey, option.help)}
+                </p>
+              </div>
+            </div>
+            <ToggleButton
+              checked={checked}
+              onChange={(enabled) => onChange(
+                updateProviderRequestOption(option, enabled, form),
+              )}
+              ariaLabel={title}
+              label={checked ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -4143,11 +4272,11 @@ function ProviderAdvancedOptions({
               </label>
             ) : null}
           </div>
-          {footer ? (
-            <div className="mt-3 flex items-center justify-end gap-2 border-t border-border/45 pt-3">
-              {footer}
-            </div>
-          ) : null}
+        </div>
+      ) : null}
+      {footer ? (
+        <div className="flex items-center justify-end gap-2 border-t border-border/45 py-3">
+          {footer}
         </div>
       ) : null}
     </div>
@@ -4398,6 +4527,11 @@ function ProvidersSettings({
                     </Button>
                   </div>
                 </div>
+                <ProviderRequestOptions
+                  providerName={provider.name}
+                  form={form}
+                  onChange={(value) => onChangeProviderForm(provider.name, value)}
+                />
                 {supportsOauthAdvancedSettings ? (
                   <ProviderAdvancedOptions
                     fields={advancedFields}
@@ -4523,6 +4657,11 @@ function ProvidersSettings({
                     className="h-9 rounded-full text-[13px]"
                   />
                 </label>
+                <ProviderRequestOptions
+                  providerName={provider.name}
+                  form={form}
+                  onChange={(value) => onChangeProviderForm(provider.name, value)}
+                />
                 <ProviderAdvancedOptions
                   fields={advancedFields}
                   form={form}
@@ -4760,11 +4899,11 @@ function ProvidersSettings({
               <DropdownMenuContent
                 align="end"
                 sideOffset={8}
-                className="max-h-[24rem] w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-[20px] border-border bg-popover p-1.5 shadow-none scrollbar-thin scrollbar-track-transparent"
+                className="max-h-[24rem] w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto scrollbar-thin scrollbar-track-transparent"
               >
                 <DropdownMenuItem
                   onSelect={beginCustomProviderCreation}
-                  className="flex min-h-[54px] cursor-default items-center gap-3 rounded-[14px] px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
+                  className="flex min-h-[54px] cursor-default items-center gap-3 px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
                 >
                   <ProviderIcon provider="custom" showBrandLogos={showBrandLogos} />
                   <span className="truncate text-[13px] font-medium">
@@ -4781,7 +4920,7 @@ function ProvidersSettings({
                         onToggleProvider(provider.name);
                       }
                     }}
-                    className="flex min-h-[54px] cursor-default items-center gap-3 rounded-[14px] px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
+                    className="flex min-h-[54px] cursor-default items-center gap-3 px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
                   >
                     <ProviderIcon
                       provider={provider.name}
@@ -4857,10 +4996,7 @@ function ImageGenerationSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.imageGeneration", "Image generation")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.imageGeneration", "Image generation")}
-            description={tx("settings.help.imageGeneration", "Expose generate_image in chats when a configured image provider is available.")}
-          >
+          <SettingsRow title={tx("settings.rows.imageGeneration", "Image generation")}>
             <ToggleButton
               checked={form.enabled}
               onChange={(enabled) => onChangeForm((prev) => ({ ...prev, enabled }))}
@@ -4868,10 +5004,7 @@ function ImageGenerationSettings({
               label={form.enabled ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.imageProvider", "Image provider")}
-            description={tx("settings.help.imageProvider", "Choose the registry provider used by generate_image.")}
-          >
+          <SettingsRow title={tx("settings.rows.imageProvider", "Image provider")}>
             <ProviderPicker
               providers={settings.image_generation.providers}
               value={form.provider}
@@ -4908,10 +5041,7 @@ function ImageGenerationSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.imageDefaults", "Defaults")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.imageModel", "Image model")}
-            description={tx("settings.help.imageModel", "Model name sent to the selected image provider.")}
-          >
+          <SettingsRow title={tx("settings.rows.imageModel", "Image model")}>
             <ModelIdPicker
               token={token}
               settings={settings}
@@ -4931,10 +5061,7 @@ function ImageGenerationSettings({
               onChange={(model) => onChangeForm((prev) => ({ ...prev, model }))}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.defaultAspectRatio", "Default aspect")}
-            description={tx("settings.help.defaultAspectRatio", "Used when the prompt does not choose an aspect ratio.")}
-          >
+          <SettingsRow title={tx("settings.rows.defaultAspectRatio", "Default aspect")}>
             <ProviderPicker
               providers={aspectOptions}
               value={form.defaultAspectRatio}
@@ -4944,10 +5071,7 @@ function ImageGenerationSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.defaultImageSize", "Default size")}
-            description={tx("settings.help.defaultImageSize", "Size hint sent to providers that support it.")}
-          >
+          <SettingsRow title={tx("settings.rows.defaultImageSize", "Default size")}>
             <ProviderPicker
               providers={sizeOptions}
               value={form.defaultImageSize}
@@ -4957,10 +5081,7 @@ function ImageGenerationSettings({
               }
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.maxImagesPerTurn", "Max images per turn")}
-            description={tx("settings.help.maxImagesPerTurn", "Upper bound for one generate_image request.")}
-          >
+          <SettingsRow title={tx("settings.rows.maxImagesPerTurn", "Max images per turn")}>
             <NumberInput
               value={form.maxImagesPerTurn}
               min={1}
@@ -5041,10 +5162,7 @@ function TranscriptionSettings({
             label={form.enabled ? tx("settings.values.on", "On") : tx("settings.values.off", "Off")}
           />
         </SettingsRow>
-        <SettingsRow
-          title={tx("settings.rows.transcriptionProvider", "Provider")}
-          description={tx("settings.help.transcriptionProvider", "Uses the matching provider credentials from Providers.")}
-        >
+        <SettingsRow title={tx("settings.rows.transcriptionProvider", "Provider")}>
           <ProviderPicker
             providers={transcription.providers}
             value={form.provider}
@@ -5211,10 +5329,7 @@ function WebSettings({
           <p className="mb-3 text-[12px] text-destructive">{capabilityError}</p>
         ) : null}
         <SettingsGroup>
-          <SettingsRow
-            title={t("settings.byok.webSearch.provider")}
-            description={t("settings.byok.webSearch.providerHelp")}
-          >
+          <SettingsRow title={t("settings.byok.webSearch.provider")}>
             <ProviderPicker
               providers={settings.web_search.providers}
               value={form.provider}
@@ -5225,10 +5340,7 @@ function WebSettings({
           </SettingsRow>
 
           {selectedProvider?.credential === "none" ? (
-            <SettingsRow
-              title={t("settings.byok.webSearch.credentials")}
-              description={t("settings.byok.webSearch.noCredentialHelp")}
-            >
+            <SettingsRow title={t("settings.byok.webSearch.credentials")}>
               <StatusPill tone="success">{t("settings.byok.webSearch.noCredentialRequired")}</StatusPill>
             </SettingsRow>
           ) : null}
@@ -5313,10 +5425,7 @@ function WebSettings({
       <section>
         <SettingsSectionTitle>{tx("settings.sections.webBehavior", "Behavior")}</SettingsSectionTitle>
         <SettingsGroup>
-          <SettingsRow
-            title={tx("settings.rows.maxResults", "Max results")}
-            description={tx("settings.help.maxResults", "Results returned by each web_search call.")}
-          >
+          <SettingsRow title={tx("settings.rows.maxResults", "Max results")}>
             <NumberInput
               value={form.maxResults ?? settings.web_search.max_results}
               min={1}
@@ -5324,10 +5433,7 @@ function WebSettings({
               onChange={(maxResults) => onChangeForm((prev) => ({ ...prev, maxResults }))}
             />
           </SettingsRow>
-          <SettingsRow
-            title={tx("settings.rows.timeout", "Timeout")}
-            description={tx("settings.help.timeout", "Seconds before a search provider request times out.")}
-          >
+          <SettingsRow title={tx("settings.rows.timeout", "Timeout")}>
             <NumberInput
               value={form.timeout ?? settings.web_search.timeout}
               min={1}
@@ -5388,6 +5494,7 @@ function AutomationsSettings({
   onAction,
   onRequestEdit,
   onRequestDelete,
+  onBackToChat,
 }: {
   payload: AutomationsPayload | null;
   loading: boolean;
@@ -5402,6 +5509,7 @@ function AutomationsSettings({
   onAction: (action: AutomationAction, job: SessionAutomationJob) => void | Promise<void>;
   onRequestEdit: (job: SessionAutomationJob) => void;
   onRequestDelete: (job: SessionAutomationJob) => void;
+  onBackToChat: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const tx = (key: string, fallback: string, values?: Record<string, unknown>) =>
@@ -5449,74 +5557,76 @@ function AutomationsSettings({
 
   return (
     <div className="space-y-5">
-      <section className="shrink-0">
-        <div className="mx-auto flex w-full max-w-[56rem] flex-col gap-3">
-          <div className="-mx-1 overflow-x-auto px-1 pb-0.5">
-            <div className="grid w-full min-w-[36rem] grid-cols-5 gap-1 rounded-[15px] bg-muted p-1">
-              {summaryOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => onFilterChange(option.value)}
-                  className={cn(
-                    "inline-flex h-8 min-w-0 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-[11px] px-3 text-[12px] font-medium text-muted-foreground transition-colors",
-                    filter === option.value && "bg-background text-foreground",
-                    automationFilterToneClass(option.value, option.count, filter === option.value),
-                  )}
-                >
-                  <span>{option.label}</span>
-                  <span
+      {jobs.length ? (
+        <section className="shrink-0">
+          <div className="mx-auto flex w-full max-w-[56rem] flex-col gap-3">
+            <div className="-mx-1 overflow-x-auto px-1 pb-0.5">
+              <div className="grid w-full min-w-[36rem] grid-cols-5 gap-1 rounded-[15px] bg-muted p-1">
+                {summaryOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => onFilterChange(option.value)}
                     className={cn(
-                      "min-w-5 shrink-0 rounded-full bg-background/75 px-1.5 py-0.5 text-center text-[11px] tabular-nums text-muted-foreground",
-                      automationFilterCountClass(option.value, option.count),
+                      "inline-flex h-8 min-w-0 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-[11px] px-3 text-[12px] font-medium text-muted-foreground transition-colors",
+                      filter === option.value && "bg-background text-foreground",
+                      automationFilterToneClass(option.value, option.count, filter === option.value),
                     )}
                   >
-                    {option.count}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-            <div className="relative min-w-0">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/70" />
-              <Input
-                value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
-                placeholder={tx(
-                  "settings.automations.search",
-                  "Search task, message, linked chat, or schedule",
-                )}
-                className={cn(
-                  "h-9 w-full rounded-[13px] pl-9 text-[13px]",
-                  SETTINGS_SEARCH_INPUT_CLASS,
-                )}
-              />
-            </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="inline-flex h-9 min-w-[8.5rem] items-center justify-center gap-1.5 whitespace-nowrap rounded-[13px] border border-border/45 bg-settings-surface px-3 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:w-auto"
-                >
-                  <ArrowUpDown className="h-3.5 w-3.5" aria-hidden />
-                  <span>{sortLabel[sort]}</span>
-                  <ChevronDown className="h-3.5 w-3.5" aria-hidden />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="min-w-40">
-                {(Object.keys(sortLabel) as AutomationSort[]).map((value) => (
-                  <DropdownMenuItem key={value} onClick={() => onSortChange(value)}>
-                    <span>{sortLabel[value]}</span>
-                    {sort === value ? <Check className="ml-auto h-3.5 w-3.5" aria-hidden /> : null}
-                  </DropdownMenuItem>
+                    <span>{option.label}</span>
+                    <span
+                      className={cn(
+                        "min-w-5 shrink-0 rounded-full bg-background/75 px-1.5 py-0.5 text-center text-[11px] tabular-nums text-muted-foreground",
+                        automationFilterCountClass(option.value, option.count),
+                      )}
+                    >
+                      {option.count}
+                    </span>
+                  </button>
                 ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+              </div>
+            </div>
+
+            <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+              <div className="relative min-w-0">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/70" />
+                <Input
+                  value={query}
+                  onChange={(event) => onQueryChange(event.target.value)}
+                  placeholder={tx(
+                    "settings.automations.search",
+                    "Search task, message, linked chat, or schedule",
+                  )}
+                  className={cn(
+                    "h-9 w-full rounded-[13px] pl-9 text-[13px]",
+                    SETTINGS_SEARCH_INPUT_CLASS,
+                  )}
+                />
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex h-9 min-w-[8.5rem] items-center justify-center gap-1.5 whitespace-nowrap rounded-[13px] border border-border/45 bg-settings-surface px-3 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:w-auto"
+                  >
+                    <ArrowUpDown className="h-3.5 w-3.5" aria-hidden />
+                    <span>{sortLabel[sort]}</span>
+                    <ChevronDown className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-40">
+                  {(Object.keys(sortLabel) as AutomationSort[]).map((value) => (
+                    <DropdownMenuItem key={value} onClick={() => onSortChange(value)}>
+                      <span>{sortLabel[value]}</span>
+                      {sort === value ? <Check className="ml-auto h-3.5 w-3.5" aria-hidden /> : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      ) : null}
 
       {error ? (
         <div className="flex items-center gap-2 rounded-[18px] border border-destructive/20 bg-destructive/5 px-4 py-3 text-[13px] text-destructive">
@@ -5574,13 +5684,35 @@ function AutomationsSettings({
               : tx("settings.automations.empty", "No automations yet.")}
           </div>
           {!jobs.length ? (
-            <div className="mx-auto mt-2 max-w-[28rem] text-[12px] leading-5">
-              {tx(
-                "settings.automations.emptyHint",
-                "Create one from where it should run so nanobot keeps the right context.",
-              )}
-            </div>
-          ) : null}
+            <>
+              <div className="mx-auto mt-2 max-w-[28rem] text-[12px] leading-5">
+                {tx(
+                  "settings.automations.emptyHint",
+                  "Create automations in a chat so they keep the right context.",
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="mt-4 rounded-full"
+                onClick={onBackToChat}
+              >
+                {tx("settings.automations.emptyAction", "Open a chat")}
+              </Button>
+            </>
+          ) : (
+            <Button
+              type="button"
+              variant="outline"
+              className="mt-4 rounded-full"
+              onClick={() => {
+                onQueryChange("");
+                onFilterChange("all");
+              }}
+            >
+              {tx("settings.automations.clearFilters", "Clear filters")}
+            </Button>
+          )}
         </div>
       )}
     </div>
@@ -6290,7 +6422,7 @@ function NanobotFeatureInstallDialog({
     <Dialog open={Boolean(feature)} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="w-[min(calc(100vw-2rem),24rem)] gap-0 rounded-[28px] border border-white/70 bg-card/95 p-5 text-center shadow-[0_24px_80px_rgba(15,23,42,0.20)] backdrop-blur-xl sm:rounded-[28px]"
+        className="w-[min(calc(100vw-2rem),24rem)] gap-0 p-5 text-center"
       >
         <DialogHeader className="items-center space-y-0 text-center">
           <DialogTitle className="text-center text-[20px] font-semibold leading-tight tracking-[-0.02em] text-foreground">
@@ -7077,23 +7209,6 @@ function ChannelsSettings({
     >
       {!showingCompactDetail ? (
         <section className="shrink-0 space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <p className="max-w-[680px] text-[13px] leading-5 text-muted-foreground">
-              {tx(
-                "settings.channels.description",
-                "Connect chat apps, email, and WebUI to nanobot.",
-              )}
-            </p>
-            <div className="flex flex-wrap gap-2 text-[12px] font-medium text-muted-foreground">
-              <span className="rounded-full bg-muted/70 px-2.5 py-1">
-                {t("settings.channels.caption", {
-                  enabled: enabledCount,
-                  total: allChannels.length,
-                  defaultValue: "{{enabled}} enabled · {{total}} channels",
-                })}
-              </span>
-            </div>
-          </div>
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <div className="relative min-w-0 flex-1">
               <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -7207,10 +7322,6 @@ function ChannelsSettings({
           </div>
         )}
       </section>
-
-      <div className={cn("shrink-0 pt-2", showingCompactDetail && "hidden")}>
-        <ThirdPartyBrandNotice />
-      </div>
     </div>
   );
 }
@@ -7313,29 +7424,31 @@ function AppsCatalogSettings({
     (cliAppsLoading || mcpPresetsLoading) &&
     !cliApps &&
     !mcpPresets;
+  const cliAppCount = cliApps?.apps.length ?? 0;
+  const emptyTitle = normalizedQuery
+    ? tx("settings.apps.empty", "No tools match your search.")
+    : filter === "cli"
+      ? tx("settings.apps.emptyApps", "No apps available.")
+      : filter === "mcp"
+        ? tx("settings.apps.emptyIntegrations", "No integrations available.")
+        : tx("settings.apps.emptyReady", "No tools are ready yet.");
+  const emptyBrowseTarget: AppsKindFilter | null = normalizedQuery
+    ? null
+    : filter === "cli"
+      ? "mcp"
+      : filter === "mcp"
+        ? (cliAppCount ? "cli" : null)
+        : cliAppCount
+          ? "cli"
+          : "mcp";
   const statusMessage =
     cliError ||
     mcpError ||
     (!focusedApp ? cliMessage || mcpMessage : null);
   const statusIsError = Boolean(cliError || mcpError);
-  const readyCount = (cliApps?.installed_count ?? 0) + (mcpPresets?.installed_count ?? 0);
-  const caption = t("settings.apps.enabledSummary", {
-    count: readyCount,
-    defaultValue: "{{count}} ready",
-  });
-
   return (
     <div className="space-y-7">
       <section className="space-y-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <p className="max-w-[680px] text-[13px] leading-5 text-muted-foreground">
-            {tx(
-              "settings.apps.description",
-              "Add tools to nanobot, then @ them in chat.",
-            )}
-          </p>
-          <span className="text-[12px] font-medium text-muted-foreground">{caption}</span>
-        </div>
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -7416,7 +7529,35 @@ function AppsCatalogSettings({
           </div>
         ) : (
           <div className="px-3 py-12 text-center text-sm text-muted-foreground">
-            {tx("settings.apps.empty", "No tools match this view.")}
+            <p>{emptyTitle}</p>
+            {normalizedQuery ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="mt-4 rounded-full"
+                onClick={() => onQueryChange("")}
+              >
+                {tx("settings.apps.clearSearch", "Clear search")}
+              </Button>
+            ) : emptyBrowseTarget ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="mt-4 rounded-full"
+                onClick={() => onFilterChange(emptyBrowseTarget)}
+              >
+                {emptyBrowseTarget === "cli"
+                  ? tx("settings.apps.browseApps", "Browse apps")
+                  : tx("settings.apps.browseIntegrations", "Browse integrations")}
+              </Button>
+            ) : (
+              <p className="mx-auto mt-2 max-w-[28rem] text-[12px] leading-5">
+                {tx(
+                  "settings.apps.emptyIntegrationsHint",
+                  "Add a custom integration below.",
+                )}
+              </p>
+            )}
           </div>
         )}
       </section>
@@ -7432,8 +7573,6 @@ function AppsCatalogSettings({
           onImportConfig={onImportMcpConfig}
         />
       ) : null}
-
-      <ThirdPartyBrandNotice />
     </div>
   );
 }
@@ -7484,15 +7623,19 @@ function CliAppsCatalogRow({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("test", app.name)}>
-                  <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <PlayCircle aria-hidden />
                   {tx("settings.cliApps.test", "Test CLI")}
                 </DropdownMenuItem>
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("update", app.name)}>
-                  <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <RotateCcw aria-hidden />
                   {tx("settings.cliApps.update", "Update CLI")}
                 </DropdownMenuItem>
-                <DropdownMenuItem disabled={busy} onClick={() => onAction("uninstall", app.name)}>
-                  <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden />
+                <DropdownMenuItem
+                  tone="destructive"
+                  disabled={busy}
+                  onClick={() => onAction("uninstall", app.name)}
+                >
+                  <Trash2 aria-hidden />
                   {tx("settings.cliApps.uninstall", "Uninstall CLI")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -7616,17 +7759,21 @@ function McpAppsCatalogRow({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem disabled={busy} onClick={() => onAction("test", preset.name)}>
-                    <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden />
+                    <PlayCircle aria-hidden />
                     {tx("settings.mcp.test", "Test")}
                   </DropdownMenuItem>
                   {toolNames.length ? (
                     <DropdownMenuItem disabled={busy} onClick={() => setToolsOpen((open) => !open)}>
-                      <SlidersHorizontal className="mr-2 h-3.5 w-3.5" aria-hidden />
+                      <SlidersHorizontal aria-hidden />
                       {tx("settings.mcp.toolScope", "Tools")}
                     </DropdownMenuItem>
                   ) : null}
-                  <DropdownMenuItem disabled={busy} onClick={() => onAction("remove", preset.name)}>
-                    <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <DropdownMenuItem
+                    tone="destructive"
+                    disabled={busy}
+                    onClick={() => onAction("remove", preset.name)}
+                  >
+                    <Trash2 aria-hidden />
                     {tx("settings.mcp.remove", "Remove")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -7690,7 +7837,7 @@ function McpAppsCatalogRow({
               onClick={() => setSetupOpen(false)}
               className="h-7 rounded-full px-2.5 text-[11.5px] font-semibold text-muted-foreground"
             >
-              {tx("actions.cancel", "Cancel")}
+              {tx("settings.actions.cancel", "Cancel")}
             </Button>
           </div>
           <div className="mt-3 grid gap-2">
@@ -8294,11 +8441,7 @@ function CliAppLogo({ app, showBrandLogos }: { app: CliAppInfo; showBrandLogos: 
 
 function RuntimeSettings({
   form,
-  setForm,
   settings,
-  dirty,
-  saving,
-  onSave,
   onRestart,
   isRestarting,
   requiresRestartPending,
@@ -8314,11 +8457,7 @@ function RuntimeSettings({
   onInstallCapability,
 }: {
   form: AgentSettingsDraft;
-  setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
   settings: SettingsPayload;
-  dirty: boolean;
-  saving: boolean;
-  onSave: () => void;
   onRestart?: () => void;
   isRestarting?: boolean;
   requiresRestartPending: boolean;
@@ -8414,50 +8553,6 @@ function RuntimeSettings({
   };
   return (
     <div className="space-y-7">
-      <section>
-        <SettingsSectionTitle>{tx("settings.sections.identity", "Identity")}</SettingsSectionTitle>
-          <SettingsGroup>
-          <SettingsRow title={tx("settings.rows.botName", "Bot name")} description={tx("settings.help.botName", "Shown wherever nanobot uses a display name.")}>
-            <Input
-              value={form.botName}
-              onChange={(event) => setForm((prev) => ({ ...prev, botName: event.target.value }))}
-              className="h-8 w-[220px] rounded-full text-[13px]"
-            />
-          </SettingsRow>
-          <SettingsRow title={tx("settings.rows.botIcon", "Bot icon")} description={tx("settings.help.botIcon", "Short emoji or text shown with the bot name.")}>
-            <Input
-              value={form.botIcon}
-              onChange={(event) => setForm((prev) => ({ ...prev, botIcon: event.target.value }))}
-              className="h-8 w-[120px] rounded-full text-center text-[13px]"
-            />
-          </SettingsRow>
-          <SettingsRow title={tx("settings.rows.timezone", "Timezone")} description={tx("settings.help.timezone", "Used for schedules and time-aware replies.")}>
-            <TimezonePicker
-              value={form.timezone}
-              onChange={(timezone) => setForm((prev) => ({ ...prev, timezone }))}
-            />
-          </SettingsRow>
-          <RestartSettingsFooter
-            dirty={dirty}
-            saving={saving}
-            pendingRestart={requiresRestartPending}
-            dirtyMessage={
-              isNativeHost
-                ? tx("settings.status.hostRestartAfterSaving", "Save changes and nanobot will restart its engine.")
-                : tx("settings.status.restartAfterSaving", "Save changes, then restart when ready.")
-            }
-            pendingMessage={
-              isNativeHost
-                ? tx("settings.status.hostRestartPending", "Saved. Restarting engine when ready.")
-                : tx("settings.status.savedRestartApply", "Saved. Restart when ready.")
-            }
-            onSave={onSave}
-            onRestart={onRestart}
-            isRestarting={isRestarting}
-          />
-        </SettingsGroup>
-      </section>
-
       {isNativeHost ? (
         <section>
           <SettingsSectionTitle>{tx("settings.sections.nativeHost", "Native host")}</SettingsSectionTitle>
@@ -8467,9 +8562,7 @@ function RuntimeSettings({
               <SettingsRow
                 title={tx("settings.rows.logs", "Logs")}
                 description={
-                  hostActionMessage?.target === "logs"
-                    ? hostActionMessage.message
-                    : tx("settings.help.logs", "Open the native engine log folder.")
+                  hostActionMessage?.target === "logs" ? hostActionMessage.message : undefined
                 }
               >
                 <Button
@@ -8498,9 +8591,7 @@ function RuntimeSettings({
                 description={
                   hostActionMessage?.target === "diagnostics"
                     ? hostActionMessage.message
-                    : diagnosticsPath
-                    ? diagnosticsPath
-                    : tx("settings.help.diagnostics", "Export a small runtime report for support.")
+                    : diagnosticsPath || undefined
                 }
               >
                 <Button
@@ -8545,7 +8636,7 @@ function RuntimeSettings({
                 ? apiServiceError
                 : apiDefaults.running
                   ? apiDefaults.endpoint
-                  : tx("settings.api.description", "Connect SDKs and agents through a local /v1 endpoint.")
+                  : undefined
             }
           >
             <div className="flex items-center justify-end gap-2">
@@ -8611,10 +8702,7 @@ function RuntimeSettings({
                   onChange={(value) => setApiHost(value === "network" ? "0.0.0.0" : "127.0.0.1")}
                 />
               </SettingsRow>
-              <SettingsRow
-                title={tx("settings.api.port", "Port")}
-                description={tx("settings.api.portHelp", "The API uses this local port.")}
-              >
+              <SettingsRow title={tx("settings.api.port", "Port")}>
                 <NumberInput value={apiPort} min={1} max={65535} onChange={setApiPort} />
               </SettingsRow>
               {apiNetworkAccess ? (
@@ -8650,11 +8738,6 @@ function RuntimeSettings({
             </>
           ) : null}
         </SettingsGroup>
-        {!apiDefaults.installed && !apiDefaults.running ? (
-          <p className="mt-2 text-[11.5px] text-muted-foreground">
-            {tx("settings.api.autoInstall", "API support will be installed automatically when you start it.")}
-          </p>
-        ) : null}
       </section>
 
       <section>
@@ -8664,7 +8747,7 @@ function RuntimeSettings({
             title="Langfuse"
             description={
               settings.observability?.configured
-                ? tx("settings.observability.configured", "Tracing credentials are available to nanobot.")
+                ? undefined
                 : tx(
                     "settings.observability.environment",
                     "Set LANGFUSE_SECRET_KEY and LANGFUSE_PUBLIC_KEY, then restart nanobot.",
@@ -8711,10 +8794,15 @@ function RuntimeSettings({
           ) : null}
           <ReadOnlyRow title={t("settings.rows.configPath")} value={settings.runtime.config_path} />
           <ReadOnlyRow title={tx("settings.rows.workspacePath", "Default workspace")} value={settings.runtime.workspace_path} />
-          {onRestart && !requiresRestartPending ? (
+          <ReadOnlyRow title={tx("settings.rows.timezone", "Timezone")} value={form.timezone} />
+          {onRestart ? (
             <SettingsRow
               title={t("settings.rows.restart")}
-              description={t("app.system.restartHint")}
+              description={
+                requiresRestartPending
+                  ? tx("settings.status.savedRestartApply", "Saved. Restart when ready.")
+                  : undefined
+              }
             >
               <Button
                 size="sm"
@@ -8832,89 +8920,6 @@ function AdvancedSettings({
   );
 }
 
-function TimezonePicker({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (timezone: string) => void;
-}) {
-  const { t } = useTranslation();
-  const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
-  const [query, setQuery] = useState("");
-  const options = useMemo(() => timezoneOptions(value), [value]);
-  const filteredOptions = useMemo(() => filterTimezoneOptions(options, query), [options, query]);
-
-  return (
-    <DropdownMenu onOpenChange={(open) => !open && setQuery("")}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          className={cn(
-            "h-8 w-[220px] justify-between rounded-full border-input bg-background px-3 text-[13px] font-normal shadow-none",
-            "hover:bg-accent/55 focus-visible:ring-2 focus-visible:ring-ring",
-          )}
-        >
-          <span className="truncate">{value || tx("settings.timezone.select", "Select timezone")}</span>
-          <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        className="w-[340px] max-w-[calc(100vw-2rem)]"
-      >
-        <div className="sticky top-0 z-10 bg-popover px-1 pb-1">
-          <div className="flex h-9 items-center gap-2 rounded-full border border-input bg-background px-3">
-            <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-            <Input
-              autoFocus
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => event.stopPropagation()}
-              placeholder={tx("settings.timezone.search", "Search timezone")}
-              className="h-7 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
-            />
-          </div>
-        </div>
-        <div
-          className="mt-1 max-h-[18rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
-          data-testid="timezone-picker-list"
-        >
-          {filteredOptions.length ? (
-            filteredOptions.map((option) => {
-              const selected = option.name === value;
-              return (
-                <DropdownMenuItem
-                  key={option.name}
-                  onSelect={() => onChange(option.name)}
-                  className={cn(
-                    "flex h-9 cursor-default items-center justify-between gap-3 rounded-[12px] px-2.5 text-[13px]",
-                    "focus:bg-muted/85 focus:text-foreground",
-                    selected && "bg-muted/80 text-foreground focus:bg-muted",
-                  )}
-                >
-                  <span className="min-w-0 truncate font-medium text-foreground">{option.name}</span>
-                  <span className="ml-auto flex shrink-0 items-center gap-2">
-                    <span className="text-[11.5px] font-medium text-muted-foreground/80">
-                      {option.offset}
-                    </span>
-                    {selected ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : null}
-                  </span>
-                </DropdownMenuItem>
-              );
-            })
-          ) : (
-            <div className="px-3 py-5 text-center text-[12px] text-muted-foreground">
-              {tx("settings.timezone.empty", "No matching timezones.")}
-            </div>
-          )}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 function ProviderPicker({
   providers,
   value,
@@ -8967,8 +8972,7 @@ function ProviderPicker({
               key={provider.name}
               onSelect={() => onChange(provider.name)}
               className={cn(
-                "flex cursor-default items-center justify-between gap-2 rounded-[12px] px-2.5 py-2 text-[13px]",
-                "focus:bg-muted/85 focus:text-foreground",
+                "flex cursor-default items-center justify-between gap-2 text-[13px]",
                 selected && "bg-muted/80 text-foreground focus:bg-muted",
               )}
             >
@@ -9041,16 +9045,22 @@ function ModelIdPicker({
     !hasStaticModels &&
     hasConcreteProvider && providerConfigured && !providerUsesManualModelIds;
   const normalizedQuery = query.trim().toLowerCase();
-  const providerModels: ProviderModelsPayload["models"] = hasStaticModels
-    ? (models?.map((id) => ({ id })) ?? [])
-    : (payload?.models ?? []);
-  const visibleModels = providerModels
-    .filter((model) => {
-      if (!normalizedQuery) return true;
-      return [model.id, model.label ?? "", model.description ?? "", model.owned_by ?? ""]
-        .some((field) => field.toLowerCase().includes(normalizedQuery));
-    })
-    .slice(0, 80);
+  const providerModels: ProviderModelsPayload["models"] = useMemo(
+    () => hasStaticModels
+      ? (models?.map((id) => ({ id })) ?? [])
+      : (payload?.models ?? []),
+    [hasStaticModels, models, payload?.models],
+  );
+  const visibleModels = useMemo(
+    () => providerModels
+      .filter((model) => {
+        if (!normalizedQuery) return true;
+        return [model.id, model.label ?? "", model.description ?? "", model.owned_by ?? ""]
+          .some((field) => field.toLowerCase().includes(normalizedQuery));
+      })
+      .slice(0, 80),
+    [normalizedQuery, providerModels],
+  );
   const isCatalog = payload?.catalog_kind === "catalog";
   const defersModelList = DEFERRED_MODEL_LIST_PROVIDERS.has(effectiveProvider);
   const hasDeferredSearchQuery =
@@ -9066,6 +9076,9 @@ function ModelIdPicker({
   const customCandidate = query.trim();
   const allowCustomModel = !providerRequiresConfiguration;
   const exactQueryMatch = providerModels.some((model) => model.id === customCandidate);
+  const showCustomModel = Boolean(
+    allowCustomModel && customCandidate && !exactQueryMatch && customCandidate !== value,
+  );
   const providerModelCount = payload?.model_count ?? providerModels.length;
   const modelUnconfigured = !value.trim() || !providerConfigured;
 
@@ -9104,18 +9117,31 @@ function ModelIdPicker({
     onChange(model);
     setOpen(false);
   };
+  const navigationValues = useMemo(
+    () => [
+      ...(showModels ? visibleModels.map((model) => model.id) : []),
+      ...(showCustomModel ? [customCandidate] : []),
+    ],
+    [customCandidate, showCustomModel, showModels, visibleModels],
+  );
+  const navigation = useComboboxNavigation({
+    open,
+    values: navigationValues,
+    selectedValue: value,
+    onSelect: selectModel,
+    onClose: () => setOpen(false),
+  });
 
   const renderModelRow = (
     model: ProviderModelsPayload["models"][number],
     options: { selected?: boolean } = {},
   ) => (
-    <DropdownMenuItem
+    <ComboboxOption
       key={model.id}
-      onSelect={() => selectModel(model.id)}
+      {...navigation.getOptionProps(model.id)}
       className={cn(
         "flex cursor-default items-center justify-between gap-2 rounded-[12px] px-2 py-1.5 text-[12px]",
-        "focus:bg-muted/85 focus:text-foreground",
-        options.selected && "bg-muted/80 text-foreground focus:bg-muted",
+        options.selected && "text-foreground",
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
@@ -9141,12 +9167,12 @@ function ModelIdPicker({
         {model.context_window ? <span>{formatContextWindow(model.context_window)}</span> : null}
         {options.selected ? <Check className="h-3.5 w-3.5 text-foreground" aria-hidden /> : null}
       </span>
-    </DropdownMenuItem>
+    </ComboboxOption>
   );
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
         <Button
           type="button"
           variant="outline"
@@ -9172,8 +9198,8 @@ function ModelIdPicker({
           </span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
+      </PopoverTrigger>
+      <PopoverContent
         align="end"
         className="w-[360px] max-w-[calc(100vw-2rem)] p-1.5"
       >
@@ -9186,13 +9212,7 @@ function ModelIdPicker({
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                event.stopPropagation();
-                if (event.key === "Enter" && allowCustomModel && customCandidate) {
-                  event.preventDefault();
-                  selectModel(customCandidate);
-                }
-              }}
+              {...navigation.inputProps}
               placeholder={
                 searchPlaceholder || tx("settings.models.searchModels", "Search or type model ID")
               }
@@ -9248,11 +9268,36 @@ function ModelIdPicker({
           </div>
         ) : null}
 
-        {showModels && visibleModels.length ? (
-          <div className="max-h-[16rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent">
-            {visibleModels.map((model) =>
-              renderModelRow(model, { selected: model.id === value }),
-            )}
+        {navigationValues.length ? (
+          <div
+            {...navigation.listProps}
+            aria-label={searchPlaceholder || tx("settings.models.selectModel", "Select model")}
+            className="max-h-[16rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
+          >
+            {showModels
+              ? visibleModels.map((model) =>
+                renderModelRow(model, { selected: model.id === value }),
+              )
+              : null}
+            {showCustomModel ? (
+              <>
+                {showModels && visibleModels.length ? (
+                  <div role="separator" className="-mx-1.5 my-1.5 h-px bg-border/50" />
+                ) : null}
+                <ComboboxOption
+                  {...navigation.getOptionProps(customCandidate)}
+                  className="flex cursor-default items-center gap-2 rounded-[12px] px-2 py-1.5 text-[12px]"
+                >
+                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-muted/80 text-muted-foreground">
+                    <Pencil className="h-3 w-3" aria-hidden />
+                  </span>
+                  <span className="min-w-0 truncate">
+                    {tx("settings.models.useCustomModel", "Use")}{" "}
+                    <span className="font-medium text-foreground">“{customCandidate}”</span>
+                  </span>
+                </ComboboxOption>
+              </>
+            ) : null}
           </div>
         ) : showModels ? (
           <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
@@ -9260,25 +9305,8 @@ function ModelIdPicker({
           </div>
         ) : null}
 
-        {allowCustomModel && customCandidate && !exactQueryMatch && customCandidate !== value ? (
-          <>
-            {showModels ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuItem
-              onSelect={() => selectModel(customCandidate)}
-              className="flex cursor-default items-center gap-2 rounded-[12px] px-2 py-1.5 text-[12px] focus:bg-muted/85"
-            >
-              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-muted/80 text-muted-foreground">
-                <Pencil className="h-3 w-3" aria-hidden />
-              </span>
-              <span className="min-w-0 truncate">
-                {tx("settings.models.useCustomModel", "Use")}{" "}
-                <span className="font-medium text-foreground">“{customCandidate}”</span>
-              </span>
-            </DropdownMenuItem>
-          </>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -9369,18 +9397,6 @@ function ProviderPickerIcon({
   );
 }
 
-function ThirdPartyBrandNotice() {
-  const { t } = useTranslation();
-  return (
-    <p className="px-1 text-[11.5px] leading-5 text-muted-foreground/75">
-      {t("settings.legal.thirdPartyBrands", {
-        defaultValue:
-          "Product names, logos, and brands are property of their respective owners. Use is for identification only and does not imply endorsement.",
-      })}
-    </p>
-  );
-}
-
 function orderUnconfiguredProviders(
   providers: SettingsPayload["providers"],
 ): SettingsPayload["providers"] {
@@ -9409,62 +9425,6 @@ function providerVisibilityRank(provider: SettingsPayload["providers"][number]):
   if (localRank !== undefined) return localRank;
   if ((provider.api_key_required ?? true) === false) return 100;
   return 200;
-}
-
-interface TimezoneOption {
-  name: string;
-  offset: string;
-  searchText: string;
-}
-
-function timezoneOptions(current: string): TimezoneOption[] {
-  return timezonesWithCurrent(current).map((name) => {
-    const offset = timezoneOffset(name);
-    return {
-      name,
-      offset,
-      searchText: `${name} ${name.replace(/_/g, " ")} ${offset}`.toLowerCase(),
-    };
-  });
-}
-
-function timezonesWithCurrent(current: string): string[] {
-  const intl = Intl as typeof Intl & {
-    supportedValuesOf?: (key: "timeZone") => string[];
-  };
-  let values: string[];
-  try {
-    values = intl.supportedValuesOf?.("timeZone") ?? [];
-  } catch {
-    values = [];
-  }
-  const deduped = new Set([...FALLBACK_TIMEZONES, ...values, current].filter(Boolean));
-  return Array.from(deduped).sort((left, right) => {
-    if (left === "UTC") return -1;
-    if (right === "UTC") return 1;
-    return left.localeCompare(right);
-  });
-}
-
-function filterTimezoneOptions(options: TimezoneOption[], query: string): TimezoneOption[] {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return options;
-  return options.filter((option) => option.searchText.includes(normalized));
-}
-
-function timezoneOffset(timezone: string): string {
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: timezone,
-      timeZoneName: "shortOffset",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).formatToParts(new Date());
-    const value = parts.find((part) => part.type === "timeZoneName")?.value;
-    return value ? value.replace(/^GMT$/, "UTC").replace(/^GMT/, "UTC") : "UTC";
-  } catch {
-    return "Custom timezone";
-  }
 }
 
 function optionRowsWithCurrent(
@@ -9880,36 +9840,6 @@ function StatusPill({
     >
       <span className="truncate">{children}</span>
     </span>
-  );
-}
-
-function SegmentedControl({
-  value,
-  options,
-  onChange,
-}: {
-  value: string;
-  options: Array<{ value: string; label: string }>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="inline-flex h-8 items-center rounded-full bg-muted p-0.5 text-[12px] font-medium text-muted-foreground">
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
-          className={cn(
-            "rounded-full px-3 py-1 transition-colors",
-            value === option.value &&
-              "bg-background text-foreground ring-1 ring-inset ring-border/45",
-          )}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
   );
 }
 
