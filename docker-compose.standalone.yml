@@ -13,10 +13,10 @@ services:
         max-size: "50m"
         max-file: "3"
     ports:
-      - "18790:18790"
-      - "18791:18791"
-      - "18792:18792"
-      - "18793:18793"
+      - "18790:18790"   # gateway health
+      - "18791:18791"   # openaiapi plugin
+      - "18793:18793"   # mcpserver plugin
+      - "8765:8765"     # websocket channel — serves upstream's gateway WebUI
     volumes:
       - ${USERPROFILE}/.nanobot:/home/nanobottie/.nanobot
       - ${USERPROFILE}/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit

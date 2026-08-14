@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents working with this repository.
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
 
-This checkout is a **personal fork of `HKUDS/nanobot`** maintained at `fuutott/nanobot`. The fork adds plugin channels (Web UI, OpenAI API, MCP Server), tighter Docker defaults, MCP OAuth 2.1 support for remote MCP servers, multi-provider routing, per-subagent provider/model override, and dev workflow scripts for WIP syncing. See the "Fork additions" section at the bottom.
+This checkout is a **personal fork of `HKUDS/nanobot`** maintained at `fuutott/nanobot`. The fork adds plugin channels (OpenAI API, MCP Server), tighter Docker defaults, MCP OAuth 2.1 support for remote MCP servers (headless device_code/client_credentials, complementing upstream's browser OAuth), per-subagent provider/model override, and dev workflow scripts for WIP syncing. The fork's own WebUI plugin was retired in favour of upstream's gateway-served WebUI (websocket channel). See the "Fork additions" section at the bottom.
 
 ## Development Commands
 
@@ -99,19 +99,24 @@ The rest of this file is specific to this personal fork. Upstream contributors c
 
 ### Plugin Channels (`plugins/`)
 
-Three fork-authored `BaseChannel` subclasses shipped as separate Python packages:
-- `nanobot-channel-webui` — Browser UI (ships its own prebuilt webui dist)
-- `nanobot-channel-openaiapi` — HTTP API endpoint
-- `nanobot-channel-mcpserver` — MCP server integration
+Two fork-authored `BaseChannel` subclasses shipped as separate Python packages:
+- `nanobot-channel-openaiapi` — HTTP API endpoint (port 18791)
+- `nanobot-channel-mcpserver` — MCP server integration (port 18793)
 
-The Dockerfile sets `NANOBOT_SKIP_WEBUI_BUILD=1` to skip upstream's hatch webui build (the webui plugin already has its own dist).
+(The third, `nanobot-channel-webui`, was **retired** — we now serve upstream's
+gateway WebUI via the websocket channel on 8765. See the "Absorbed upstream" log.)
 
-**Discovery (post-`462a0dfb`):** upstream retired the `nanobot.channels` entry-point group these plugins used, in favour of self-contained in-tree channel packages (`nanobot/channels/<name>/manifest.py` exporting `PLUGIN = ChannelPlugin(...)`). `load_channel_package` requires the manifest's `runtime=` target to physically live inside `nanobot/channels/<name>/`. So each plugin now has a thin in-tree shim:
+The Dockerfile keeps `NANOBOT_SKIP_WEBUI_BUILD=1` on the pip installs (no node in
+the final stage) but re-adds upstream's `node:24` **webui-builder** stage and
+`COPY --from=webui-builder ... nanobot/web/dist/` so the gateway can serve the
+built SPA. pyproject's `include`/`artifacts` package the copied dist into the wheel.
+
+**Discovery (post-`462a0dfb`):** upstream retired the `nanobot.channels` entry-point group these plugins used, in favour of self-contained in-tree channel packages (`nanobot/channels/<name>/manifest.py` exporting `PLUGIN = ChannelPlugin(...)`). `load_channel_package` requires the manifest's `runtime=` target to physically live inside `nanobot/channels/<name>/`. So each remaining plugin has a thin in-tree shim:
 - `nanobot/channels/<name>/__init__.py`
 - `nanobot/channels/<name>/manifest.py` — `PLUGIN` with `runtime=f"{__package__}.runtime:<Class>"`, `setup=ChannelSetupSpec(fields={})` (configured via config.json, not the wizard), `settings_visible=False`
-- `nanobot/channels/<name>/runtime.py` — re-exports the class from the installed plugin package (`from nanobot_channel_webui.channel import WebUIChannel`), satisfying the in-package check while keeping the plugin (and its dist) as the source of truth
+- `nanobot/channels/<name>/runtime.py` — re-exports the class from the installed plugin package (`from nanobot_channel_openaiapi.channel import ...`), satisfying the in-package check while keeping the plugin as the source of truth
 
-The plugins' own `[project.entry-points."nanobot.channels"]` declarations were removed (the group is dead; discovery is via the in-tree manifests). `tests/channels/test_channel_setup.py::EXPECTED_CHANNELS` includes the 3 fork channels.
+The plugins' own `[project.entry-points."nanobot.channels"]` declarations were removed (the group is dead; discovery is via the in-tree manifests). `tests/channels/test_channel_setup.py::EXPECTED_CHANNELS` includes the 2 fork channels (openaiapi, mcpserver).
 
 **Channel deps at build:** upstream also moved per-channel dependencies out of pyproject extras into each channel's `manifest.py` (`dependencies=`) with a runtime pip auto-installer that can't run in our non-root/offline container. The Dockerfile's `ARG NANOBOT_CHANNEL_DEPS` bakes the enabled channels' deps (discord.py, python-telegram-bot, socks) at build — **keep it in sync with the enabled channels' manifest `dependencies=`** or the channel silently fails to load.
 
@@ -125,10 +130,10 @@ Agent can pass `provider=` and `model=` when calling `spawn`. Defaults inherit f
 
 ### Docker deployment shape
 
-- Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` with git, bubblewrap, libmagic1, tmux/procps/iputils/dnsutils (no Node.js — the webui plugin ships its own prebuilt dist)
+- Base image: `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` with git, bubblewrap, libmagic1, tmux/procps/iputils/dnsutils. A `node:24` **webui-builder** stage builds `nanobot/web/dist/` (upstream's gateway WebUI) and the final stage `COPY --from=webui-builder`s it in — no Node.js in the runtime image.
 - Runs as non-root user `nanobottie` (upstream renamed its user to `nanobot` + root/setpriv drop for Render in `462a0dfb`/`c7737909`; we keep `nanobottie` + direct `USER`, and upstream's entrypoint takes its "already non-root" branch for us)
 - Built-in channel extras: `ARG NANOBOT_EXTRAS=discord,telegram` — telegram is an optional extra upstream (`.[telegram]`), so it MUST be listed here or the channel silently fails to load with `No module named 'telegram'`
-- Exposed ports: **18790** (gateway), **18791** (openaiapi plugin), **18792** (webui plugin), **18793** (mcpserver plugin), 8765 (optional websocket channel) — all on all interfaces for LAN/Tailscale access (upstream now binds `127.0.0.1:18790` only)
+- Exposed ports: **18790** (gateway health), **18791** (openaiapi plugin), **18793** (mcpserver plugin), **8765** (websocket channel — serves upstream's gateway WebUI) — all on all interfaces for LAN/Tailscale access (upstream now binds `127.0.0.1` only). 18792 retired with the fork webui plugin.
 - Resource limits in `docker-compose.yml`: 1 CPU / 1 GB memory per service
 - Rebuild via `./redo.ps1` — wraps `docker compose build && docker compose up -d`
 
@@ -244,8 +249,8 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 |------|-------------|-----|
 | `config/loader.py` | Open config with `encoding="utf-8-sig"` | Tolerate UTF-8 BOM (Windows Notepad adds it) |
 | `cli/onboard.py` | `importlib.import_module(channel_cls.__module__)` instead of hardcoded `nanobot.channels.{name}` | Required to resolve channel configs for **plugin** channels (live in `nanobot_channel_*` packages) |
-| `pyproject.toml` | `fastapi`, `uvicorn`, `python-multipart` deps | Plugin channels (`nanobot-channel-{webui,openaiapi,mcpserver}`) require them |
-| `Dockerfile` / `docker-compose.yml` | Plugin channel install + ports 18791–93 + `NANOBOT_SKIP_WEBUI_BUILD=1` env | Plugin-channel deployment shape; plugin ships its own dist, so upstream's hatch webui build is wasted work |
+| `pyproject.toml` | `fastapi`, `uvicorn`, `python-multipart` deps | Plugin channels (`nanobot-channel-{openaiapi,mcpserver}`) require them |
+| `Dockerfile` / `docker-compose.yml` | node webui-builder stage + `COPY --from=webui-builder ... nanobot/web/dist/`; openaiapi/mcpserver plugin install + ports 18791/18793/8765; `NANOBOT_SKIP_WEBUI_BUILD=1` on pip installs (dist pre-built by the node stage) | Serve upstream's gateway WebUI on 8765; run the two remaining plugin channels |
 | `skills/memory/SKILL.md` | "When to Update MEMORY.md" + "Auto-consolidation" sections | Stronger guidance against `write_file`-ing MEMORY.md (which would destroy existing memory) |
 
 ### Absorbed upstream (no longer local)
@@ -256,6 +261,7 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 - **`_mcp_owner` task + `_mcp_shutdown_event`** — dropped after upstream's `edf78e70` added `_OwnedMCPConnection` + a per-server `mcp:{name}` owner task inside `connect_single_server`. Our single loop-level owner task existed to keep anyio cancel scopes off `run()`; upstream now does the same thing per-connection (each task opens its stack, waits on `close_requested`, closes in its own `finally`), which is strictly finer-grained — one failing server can't disturb the others, and reconnect/hot-reload close independently. `run()` now just `await self._connect_mcp()` and `close_mcp()` just delegates to `agent_context.close_mcp`. `_start_oauth_refresh_task` / `_oauth_refresh_loop` remain local.
 - **`default_text_provider` / `default_text_model` force-routing** — removed as unnecessary divergence (not upstream-absorbed; just never earned its keep). It forced all text traffic through one aggregator regardless of preset routing, but the config fields were unset in practice and custom providers (`cerebrasPersonal/Paid`) already route natively through upstream's `convert_extra_providers`. Dropped the forced-provider branch + extracted `api_base` resolver from `factory.py` (`config.get_api_base` already does the `p.api_base → spec.default_api_base` fallback), the `default_text_provider` cache-key line from `provider_signature`, and the `defaults.default_text_model or resolved.model` override from `loop.py`'s `from_config`. Per-subagent provider/model override + `strip_history_reasoning_content` stay local.
 - **`default_vision_provider` / `default_vision_model`** — removed as dead config: declared on `AgentDefaults` and set in config, but consumed nowhere in code.
+- **Fork `nanobot-channel-webui` plugin** — retired in favour of upstream's gateway-served WebUI (React SPA served by the websocket channel from `nanobot/web/dist/`). Deleted the in-tree shim (`nanobot/channels/webui/`), the plugin package (`plugins/nanobot-channel-webui/`), and `tests/test_webui_security.py`; dropped it from `EXPECTED_CHANNELS`. Dockerfile re-adds upstream's node webui-builder stage + `COPY` of the dist; `docker-compose`/`EXPOSE` drop port 18792. Config switches from `channels.webui` (username/password on 18792) to `channels.websocket` (enabled, `0.0.0.0:8765`, `tokenIssueSecret`; loopback auto-trusted, LAN/Tailscale needs the secret via `#/?bootstrapSecret=…`). The upstream WebUI is off by default (`websocket.enabled=false`); this deployment opts in.
 
 ## Local testing
 

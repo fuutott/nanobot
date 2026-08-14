@@ -1,8 +1,18 @@
 # syntax=docker/dockerfile:1.7
-# We use nanobot-channel-webui plugin (port 18792, ships its own dist) instead
-# of the in-tree gateway webui — so we skip upstream's node:24 webui-builder
-# stage and the COPY of nanobot/web/dist/. NANOBOT_SKIP_WEBUI_BUILD=1 also
-# prevents the hatch build hook from trying to build it during pip install.
+# We serve upstream's in-tree gateway WebUI (via the websocket channel) instead
+# of the retired fork nanobot-channel-webui plugin. That needs nanobot/web/dist/
+# built, so we re-add upstream's node webui-builder stage and COPY the dist into
+# the final image. NANOBOT_SKIP_WEBUI_BUILD=1 stays on the pip installs so the
+# hatch build hook doesn't try to rebuild it (no node in the final stage); the
+# already-built dist is packaged via pyproject's include/artifacts.
+FROM node:24-bookworm-slim AS webui-builder
+WORKDIR /app
+COPY webui/package.json webui/package-lock.json ./webui/
+WORKDIR /app/webui
+RUN npm ci
+COPY webui/ ./
+RUN mkdir -p /app/nanobot/web && npm run build
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
@@ -36,17 +46,17 @@ RUN mkdir -p nanobot && touch nanobot/__init__.py && \
     fi && \
     rm -rf nanobot
 
-# Copy the full source and install
+# Copy the full source, the built gateway WebUI dist, and install. The dist is
+# packaged into the wheel via pyproject's include/artifacts, so the gateway can
+# serve it from the installed nanobot.web package. Install into the writable venv
+# (on PATH) alongside the discord/telegram extras and our two remaining plugin
+# channel packages (webui plugin retired in favour of the gateway WebUI).
 COPY nanobot/ nanobot/
 COPY plugins/ plugins/
-# In-tree gateway webui is intentionally absent (no nanobot/web/dist/, no
-# upstream webui-builder stage) — the nanobot-channel-webui plugin provides the
-# UI on port 18792. Install into the writable venv (on PATH) alongside the
-# discord/telegram extras and our three plugin channel packages.
+COPY --from=webui-builder /app/nanobot/web/dist/ nanobot/web/dist/
 RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
         --python "$VIRTUAL_ENV/bin/python" --no-cache ".[$NANOBOT_EXTRAS]" && \
     uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache \
-        /app/plugins/nanobot-channel-webui \
         /app/plugins/nanobot-channel-openaiapi \
         /app/plugins/nanobot-channel-mcpserver
 
@@ -76,8 +86,10 @@ ENV HOME=/home/nanobottie
 # on non-graceful exit).
 ENV PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1
 
-# Gateway default port + plugin channel ports + optional WebSocket channel port
-EXPOSE 18790 18791 18792 18793 8765
+# Gateway default port + plugin channel ports (openaiapi 18791, mcpserver 18793)
+# + websocket channel port 8765 (serves upstream's gateway WebUI). 18792 dropped
+# with the retired fork webui plugin.
+EXPOSE 18790 18791 18793 8765
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["status"]

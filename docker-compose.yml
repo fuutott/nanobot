@@ -34,12 +34,12 @@ services:
     command: ["gateway"]
     restart: unless-stopped
     ports:
-      # Fork: expose all plugin channel ports on all interfaces — the WebUI
-      # (18792) and other plugins are reached over LAN/Tailscale (see the
-      # user's webui allowedOrigins). Upstream now binds 127.0.0.1:18790 only.
+      # Fork: expose gateway + plugin channel ports on all interfaces for
+      # LAN/Tailscale access. 8765 serves upstream's gateway WebUI (websocket
+      # channel); 18791 openaiapi, 18793 mcpserver. Upstream binds 127.0.0.1 only.
+      # (18792 dropped with the retired fork webui plugin.)
       - 18790:18790
       - 18791:18791
-      - 18792:18792
       - 18793:18793
       - 8765:8765
     deploy:
