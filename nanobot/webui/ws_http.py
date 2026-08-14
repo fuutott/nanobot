@@ -14,10 +14,10 @@ import json
 import mimetypes
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from loguru import logger
 from websockets.datastructures import Headers
@@ -62,6 +62,7 @@ from nanobot.webui.http_utils import (
 from nanobot.webui.http_utils import (
     is_localhost as _is_localhost,
 )
+from nanobot.webui.http_utils import is_loopback_host as _is_loopback_host
 from nanobot.webui.http_utils import (
     is_trusted_proxy_authenticated_request as _is_trusted_proxy_authenticated_request,
 )
@@ -85,6 +86,11 @@ from nanobot.webui.http_utils import (
 )
 from nanobot.webui.ingress_policy import WebUIIngressPolicy
 from nanobot.webui.media_gateway import WebUIMediaGateway
+from nanobot.webui.native_folder_picker import (
+    NativeFolderPickerError,
+    native_folder_picker_available,
+    pick_native_folder,
+)
 from nanobot.webui.session_automations import (
     all_automations_payload,
     serialize_automation_jobs,
@@ -121,6 +127,7 @@ from nanobot.webui.workspaces import WebUIWorkspaceController
 _SLOW_WEBUI_HTTP_LOG_MS = 1_000
 _WEBUI_MUTATION_PAYLOAD_ATTR = "_nanobot_webui_mutation_payload"
 _WEBUI_MUTATION_REQUEST_ATTR = "_nanobot_webui_mutation_request"
+_NO_STORE_HEADERS = [("Cache-Control", "no-store")]
 
 _WEBUI_MUTATION_PATHS = {
     "automation.enable": "/api/webui/automations/enable",
@@ -132,6 +139,7 @@ _WEBUI_MUTATION_PATHS = {
     "skill.update": "/api/webui/skills/update",
     "skill.delete": "/api/webui/skills/delete",
     "sidebar.update": "/api/webui/sidebar-state/update",
+    "workspace.pick_folder": "/api/workspaces/pick-folder",
     "settings.agent.update": "/api/settings/update",
     "settings.model_configuration.create": "/api/settings/model-configurations/create",
     "settings.model_configuration.update": "/api/settings/model-configurations/update",
@@ -160,12 +168,17 @@ _WEBUI_MUTATION_PATHS = {
     "settings.pairing.approve": "/api/settings/pairing/approve",
     "settings.pairing.deny": "/api/settings/pairing/deny",
     "settings.mcp.enable": "/api/settings/mcp-presets/enable",
+    "settings.mcp.disable": "/api/settings/mcp-presets/disable",
     "settings.mcp.remove": "/api/settings/mcp-presets/remove",
     "settings.mcp.test": "/api/settings/mcp-presets/test",
+    "settings.mcp.reconnect": "/api/settings/mcp-presets/reconnect",
     "settings.mcp.custom": "/api/settings/mcp-presets/custom",
     "settings.mcp.import": "/api/settings/mcp-presets/import",
     "settings.mcp.import_cursor": "/api/settings/mcp-presets/import-cursor",
     "settings.mcp.tools": "/api/settings/mcp-presets/tools",
+    "settings.mcp.oauth_start": "/api/settings/mcp-oauth/start",
+    "settings.mcp.oauth_complete": "/api/settings/mcp-oauth/complete",
+    "settings.mcp.oauth_cancel": "/api/settings/mcp-oauth/cancel",
 }
 
 _WEBUI_CHANNEL_CONNECT_ACTIONS = {
@@ -302,6 +315,8 @@ class GatewayHTTPHandler:
         local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
         channel_feature_action: Callable[..., Any] | None = None,
         channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+        mcp_runtime_status: Callable[[], Mapping[str, str]] | None = None,
+        mcp_reload: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         skill_state_action: Callable[[set[str]], None] | None = None,
         log: Any = logger,
     ) -> None:
@@ -321,6 +336,7 @@ class GatewayHTTPHandler:
         )
         self.skill_state_action = skill_state_action
         self._skill_install_lock = asyncio.Lock()
+        self._folder_picker_lock = asyncio.Lock()
         self.cron_service = cron_service
         self.local_trigger_store = local_trigger_store
         self.cron_pending_job_ids = cron_pending_job_ids
@@ -344,10 +360,24 @@ class GatewayHTTPHandler:
             runtime_capabilities=self._capabilities,
             channel_feature_action=channel_feature_action,
             channel_runtime_status=channel_runtime_status,
+            mcp_runtime_status=mcp_runtime_status,
+            mcp_reload=mcp_reload,
+            mcp_oauth_redirect_uri=self._mcp_oauth_redirect_uri,
         )
 
     def workspace_controls_available(self, connection: Any) -> bool:
         return self._runtime_surface == "native" or _is_localhost(connection)
+
+    def workspace_folder_picker_available(
+        self,
+        connection: Any,
+        request: WsRequest,
+    ) -> bool:
+        return (
+            _is_loopback_host(self.config.host)
+            and _is_local_browser_request(connection, request.headers)
+            and native_folder_picker_available()
+        )
 
     # -- Token management ---------------------------------------------------
 
@@ -424,6 +454,7 @@ class GatewayHTTPHandler:
             "/api/webui/skills/update",
             "/api/webui/skills/delete",
             "/api/webui/sidebar-state/update",
+            "/api/workspaces/pick-folder",
         }
 
     @staticmethod
@@ -537,9 +568,16 @@ class GatewayHTTPHandler:
                 "too many outstanding issued tokens ({}), rejecting issuance",
                 len(self.tokens.issued_tokens),
             )
-            return _http_json_response({"error": "too many outstanding tokens"}, status=429)
+            return _http_json_response(
+                {"error": "too many outstanding tokens"},
+                status=429,
+                extra_headers=_NO_STORE_HEADERS,
+            )
         token_value = self.tokens.issue_token(self.config.token_ttl_s)
-        return _http_json_response(token_response_payload(token_value, self.config.token_ttl_s))
+        return _http_json_response(
+            token_response_payload(token_value, self.config.token_ttl_s),
+            extra_headers=_NO_STORE_HEADERS,
+        )
 
     # -- Bootstrap ----------------------------------------------------------
 
@@ -569,7 +607,7 @@ class GatewayHTTPHandler:
                 "runtime_surface": self._runtime_surface,
                 "runtime_capabilities": self._capabilities,
             }
-            return _http_json_response(payload)
+            return _http_json_response(payload, extra_headers=_NO_STORE_HEADERS)
 
         api_token_allowed = bool(secret) or is_local_browser
         if not self.tokens.can_issue(include_api_token=api_token_allowed):
@@ -577,6 +615,7 @@ class GatewayHTTPHandler:
                 json.dumps({"error": "too many outstanding tokens"}).encode("utf-8"),
                 status=429,
                 content_type="application/json; charset=utf-8",
+                extra_headers=_NO_STORE_HEADERS,
             )
         token = self.tokens.issue_token(self.config.token_ttl_s, audience="webui")
         api_token = (
@@ -601,7 +640,7 @@ class GatewayHTTPHandler:
         }
         if api_token is not None:
             payload["api_token"] = api_token
-        return _http_json_response(payload)
+        return _http_json_response(payload, extra_headers=_NO_STORE_HEADERS)
 
     def _bootstrap_ws_url(self, request: Any) -> str:
         headers = getattr(request, "headers", {}) or {}
@@ -616,6 +655,14 @@ class GatewayHTTPHandler:
         scheme = "wss" if secure else "ws"
         expected_path = _normalize_config_path(self.config.path)
         return f"{scheme}://{host}{expected_path}"
+
+    def _mcp_oauth_redirect_uri(self, request: WsRequest) -> str:
+        """Derive the browser callback from the same public origin as WebSocket bootstrap."""
+        from nanobot.agent.tools.mcp_oauth import MCP_OAUTH_CALLBACK_PATH
+
+        public_ws_url = urlsplit(self._bootstrap_ws_url(request))
+        scheme = "https" if public_ws_url.scheme == "wss" else "http"
+        return urlunsplit((scheme, public_ws_url.netloc, MCP_OAUTH_CALLBACK_PATH, "", ""))
 
     # -- Session routes -----------------------------------------------------
 
@@ -828,9 +875,9 @@ class GatewayHTTPHandler:
                         self.local_trigger_store.delete(job.id)
                 elif self.cron_service is not None:
                     self.cron_service.remove_job(job.id)
-        deleted = self.session_manager.delete_session(decoded_key)
-        delete_webui_thread(decoded_key)
-        return _http_json_response({"deleted": bool(deleted)})
+        session_deleted = self.session_manager.delete_session(decoded_key)
+        transcript_deleted = delete_webui_thread(decoded_key)
+        return _http_json_response({"deleted": bool(session_deleted or transcript_deleted)})
 
     # -- Automation routes --------------------------------------------------
 
@@ -1027,6 +1074,8 @@ class GatewayHTTPHandler:
             return await self._handle_sessions_list(request)
         if got == "/api/commands":
             return self._handle_commands(request)
+        if got == "/api/workspaces/pick-folder":
+            return await self._handle_workspace_folder_picker(connection, request)
         if got == "/api/workspaces":
             return self._handle_workspaces(connection, request)
         if got == "/api/webui/skills/search":
@@ -1062,9 +1111,31 @@ class GatewayHTTPHandler:
             return _http_error(401, "Unauthorized")
         return _http_json_response(
             self.workspaces.payload(
-                controls_available=self.workspace_controls_available(connection)
+                controls_available=self.workspace_controls_available(connection),
+                folder_picker_available=self.workspace_folder_picker_available(
+                    connection,
+                    request,
+                ),
             )
         )
+
+    async def _handle_workspace_folder_picker(
+        self,
+        connection: Any,
+        request: WsRequest,
+    ) -> Response:
+        if not self.check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        if not self.workspace_folder_picker_available(connection, request):
+            return _http_error(403, "native folder picker is unavailable for this connection")
+        if self._folder_picker_lock.locked():
+            return _http_error(409, "native folder picker is already open")
+        try:
+            async with self._folder_picker_lock:
+                path = await pick_native_folder()
+        except NativeFolderPickerError as exc:
+            return _http_error(503, str(exc))
+        return _http_json_response({"path": path})
 
     def _handle_webui_skills(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):

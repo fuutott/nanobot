@@ -10,8 +10,12 @@ x-common-config: &common-config
   cap_drop:
     - ALL
   # Fork: SYS_ADMIN + unconfined apparmor/seccomp are required for the
-  # bubblewrap exec sandbox. Upstream's b76d54aa hardened its default compose by
-  # dropping these; we keep them because our deployment uses the sandbox.
+  # bubblewrap exec sandbox. Upstream hardened its default compose (CHOWN/SETGID/
+  # SETUID caps + no-new-privileges:true for its root-start entrypoint that
+  # chowns bind mounts then drops to the nanobot user). That model is
+  # incompatible with bwrap (no-new-privileges blocks the sandbox), and our fork
+  # runs as nanobottie via direct USER (already non-root), so we keep the
+  # sandbox-friendly caps instead.
   cap_add:
     - SYS_ADMIN
   security_opt:

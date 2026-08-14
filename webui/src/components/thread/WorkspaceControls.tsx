@@ -51,6 +51,7 @@ export function WorkspaceProjectPicker({
   defaultScope,
   controls,
   error,
+  onPickFolder,
   onChange,
 }: {
   isHero: boolean;
@@ -61,6 +62,7 @@ export function WorkspaceProjectPicker({
   defaultScope: WorkspaceScopePayload | null;
   controls: WorkspacesPayload["controls"] | null;
   error?: string | null;
+  onPickFolder?: () => Promise<string | null>;
   onChange?: (scope: WorkspaceScopePayload) => void;
 }) {
   const { t } = useTranslation();
@@ -79,7 +81,7 @@ export function WorkspaceProjectPicker({
     && !!defaultScope
     && !!onChange
     && controls?.can_change_project !== false;
-  const pickFolder = getRuntimeHost().pickFolder;
+  const pickFolder = getRuntimeHost().pickFolder ?? onPickFolder;
   const nativeProjectPicker = !!pickFolder;
 
   useEffect(() => {
@@ -256,10 +258,7 @@ export function WorkspaceProjectPicker({
                 aria-label={t("workspace.dialog.manual")}
                 aria-invalid={pathError || error ? true : undefined}
                 aria-describedby={pathError || error ? pathErrorId : undefined}
-                className={cn(
-                  "h-9 rounded-full border-border/55 bg-background/80 px-3 text-[12.5px]",
-                  "focus-visible:ring-1 focus-visible:ring-foreground/10 focus-visible:ring-offset-0",
-                )}
+                className="h-9 rounded-full border-border/55 bg-background/80 px-3 text-[12.5px]"
               />
               <Button
                 type="submit"

@@ -37,6 +37,32 @@ _add_plugin_path(_ROOT / "plugins" / "nanobot-channel-openaiapi")
 _add_plugin_path(_ROOT / "plugins" / "nanobot-channel-mcpserver")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_sessions_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Redirect session storage away from the real active config data directory.
+
+    Session storage lives under the active runtime data root (outside the workspace,
+    per ADR-0001), so without redirection tests would write into the real home.
+    """
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-runtime-root"
+    legacy_root = tmp_path.parent / f"{tmp_path.name}-legacy-sessions-root"
+
+    def runtime_subdir(name: str) -> Path:
+        path = runtime_root / name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(
+        "nanobot.session.manager.get_runtime_subdir",
+        runtime_subdir,
+    )
+    monkeypatch.setattr(
+        "nanobot.session.manager.get_legacy_sessions_dir",
+        lambda: legacy_root,
+    )
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _use_windows_system_ca_for_default_http_clients() -> Iterator[None]:
     """Avoid reparsing certifi's CA bundle for every offline HTTP client.

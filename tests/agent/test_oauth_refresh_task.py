@@ -14,7 +14,7 @@ import pytest
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import MCPServerConfig, OAuthConfig
+from nanobot.config.schema import MCPServerConfig, OAuthConfig, ToolsConfig
 
 
 def _make_loop(tmp_path, *, mcp_servers: dict | None = None) -> AgentLoop:
@@ -22,12 +22,13 @@ def _make_loop(tmp_path, *, mcp_servers: dict | None = None) -> AgentLoop:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
     provider.generation.max_tokens = 4096
+    # Post-#5343 the loop reads MCP servers from tools_config, not a mcp_servers param.
     return AgentLoop(
         bus=bus,
         provider=provider,
         workspace=tmp_path,
         model="test-model",
-        mcp_servers=mcp_servers or {},
+        tools_config=ToolsConfig(mcp_servers=mcp_servers or {}),
     )
 
 

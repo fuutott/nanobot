@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
-from pydantic import AliasChoices, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nanobot.config.timezone import detect_system_timezone
@@ -394,6 +394,12 @@ class OAuthConfig(Base):
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio, SSE, or streamable HTTP)."""
     type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
+    # Fork+upstream union: "oauth" selects upstream's native browser OAuth flow
+    # (tokens stored outside config, WebUI-driven); an OAuthConfig object selects
+    # the fork's headless device_code / client_credentials flows (nanobot mcp-auth),
+    # required for containers with no browser. Order matters: a bare "oauth" string
+    # can't match the OAuthConfig model, so it falls through to the Literal.
+    auth: OAuthConfig | Literal["oauth"] | None = None
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
@@ -402,7 +408,6 @@ class MCPServerConfig(Base):
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all capabilities (tools, resources, prompts); any restriction = only listed tools, no resources/prompts
-    auth: OAuthConfig | None = None  # OAuth configuration for remote MCP servers
 
 
 def _lazy_default(module_path: str, class_name: str) -> Any:
@@ -452,6 +457,8 @@ class ToolsConfig(Base):
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
+    _source_path: Path | None = PrivateAttr(default=None)
+
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
@@ -469,6 +476,15 @@ class Config(BaseSettings):
         if not type(self).__pydantic_complete__:
             _resolve_tool_config_refs()
         super().__init__(**values)
+
+    def bind_source_path(self, path: Path) -> None:
+        """Record the config file that owns instance-level runtime data."""
+        self._source_path = path.expanduser().resolve(strict=False)
+
+    @property
+    def runtime_data_dir(self) -> Path | None:
+        """Return the active instance data directory when loaded from a config path."""
+        return self._source_path.parent if self._source_path is not None else None
 
     @model_validator(mode="after")
     def _validate_model_preset(self) -> "Config":

@@ -75,6 +75,7 @@ def load_config(config_path: Path | None = None) -> Config:
                 summary="Environment-based configuration is invalid.",
                 issues=validation_issues(exc),
             ) from exc
+        config.bind_source_path(path)
         _apply_ssrf_whitelist(config)
         return config
 
@@ -131,6 +132,7 @@ def load_config(config_path: Path | None = None) -> Config:
             issues=issues,
         ) from exc
 
+    config.bind_source_path(path)
     _apply_ssrf_whitelist(config)
     return config
 

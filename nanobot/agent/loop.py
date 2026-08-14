@@ -95,11 +95,9 @@ from nanobot.utils.runtime import (
 )
 
 if TYPE_CHECKING:
-    from nanobot.agent.tools.mcp import MCPConnection
     from nanobot.config.schema import (
         ChannelsConfig,
         Config,
-        MCPServerConfig,
         ProviderConfig,
         ToolsConfig,
     )
@@ -281,7 +279,7 @@ class AgentLoop:
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
-        mcp_servers: dict[str, MCPServerConfig] | None = None,
+        tool_registry: ToolRegistry | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
@@ -392,7 +390,7 @@ class AgentLoop:
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
-        self.tools = ToolRegistry()
+        self.tools = tool_registry if tool_registry is not None else ToolRegistry()
         # One file-read/write tracker per logical session. The tool registry is
         # shared by this loop, so tools resolve the active state via contextvars.
         self._file_state_store = FileStateStore()
@@ -415,14 +413,11 @@ class AgentLoop:
         )
         self._unified_session = unified_session
         self._running = False
-        self._mcp_servers = mcp_servers or {}
-        self._mcp_stacks: dict[str, MCPConnection] = {}
-        self._mcp_connecting = False
         self._runtime_context_providers: list[RuntimeContextProvider] = []
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._discarding_sessions: set[str] = set()
         self._background_tasks: set[asyncio.Task[Any]] = set()
-        self._close_mcp_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -479,9 +474,14 @@ class AgentLoop:
         cls,
         config: Config,
         bus: MessageBus | None = None,
+        *,
+        tool_registry: ToolRegistry,
         **extra: Any,
     ) -> AgentLoop:
         """Create an AgentLoop from config with the common parameter set.
+
+        The tool registry is caller-owned so application composition can share
+        it with infrastructure such as an ``MCPProvider``.
 
         Extra keyword arguments are forwarded to ``AgentLoop.__init__``,
         allowing callers to override or extend the standard config-derived
@@ -493,6 +493,12 @@ class AgentLoop:
         if bus is None:
             bus = MessageBus()
         defaults = config.agents.defaults
+        if "session_manager" not in extra:
+            data_dir = config.runtime_data_dir
+            extra["session_manager"] = SessionManager(
+                config.workspace_path,
+                sessions_root=data_dir / "sessions" if data_dir is not None else None,
+            )
         provider = extra.pop("provider", None) or make_provider(config)
         resolved = config.resolve_preset()
         model = extra.pop("model", None) or resolved.model
@@ -564,7 +570,6 @@ class AgentLoop:
             provider_retry_mode=defaults.provider_retry_mode,
             tool_hint_max_length=defaults.tool_hint_max_length,
             restrict_to_workspace=config.tools.restrict_to_workspace,
-            mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,
             timezone=defaults.timezone,
             unified_session=defaults.unified_session,
@@ -582,6 +587,7 @@ class AgentLoop:
             subagent_provider_factory=_subagent_provider_factory,
             subagent_available_providers=available_providers,
             subagent_available_models=available_models,
+            tool_registry=tool_registry,
             **extra,
         )
 
@@ -707,10 +713,6 @@ class AgentLoop:
             registered.append("my")
 
         logger.info("Registered {} tools: {}", len(registered), registered)
-
-    async def _connect_mcp(self) -> None:
-        """Connect configured MCP servers."""
-        await agent_context.connect_mcp(self, self.tools)
 
     def register_runtime_context_provider(
         self,
@@ -1222,10 +1224,10 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
-        try:
-            await self._connect_mcp()
-        except BaseException:
-            logger.exception("MCP connect failed")
+        # Fork: MCP connection lifecycle now lives in MCPProvider (#5343), but our
+        # headless-OAuth token refresher still runs here — it refreshes tokens on
+        # disk and reloads the affected server so the live session picks up the new
+        # bearer. Reads server configs from self.tools_config.mcp_servers.
         self._start_oauth_refresh_task()
         logger.info("Agent loop started")
 
@@ -1321,8 +1323,7 @@ class AgentLoop:
                 active_tasks.add(task)
                 task.add_done_callback(active_tasks.discard)
         finally:
-            # MCP stdio transports use AnyIO cancel scopes; close them from the task that opened them.
-            await self.close_mcp()
+            await self.aclose()
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
@@ -1440,24 +1441,24 @@ class AgentLoop:
                 await delivery.idle()
                 await self._publish_next_deferred_automation_turn(session_key)
 
-    async def close_mcp(self) -> None:
-        """Stop active work, then close exec, subagent, and MCP resources.
+    async def aclose(self) -> None:
+        """Stop active work, then close resources owned by the agent loop.
 
         Resource teardown must still run if cancellation interrupts task draining.
         Gateway shutdown deliberately bounds this coroutine, so keeping the cleanup
         phase in ``finally`` prevents a timed-out background task from leaving
         subprocess transports alive after the event loop closes.
         """
-        # The agent loop closes itself from ``run()`` while gateway shutdown also
+        # The loop closes itself from ``run()`` while application shutdown also
         # performs a guaranteed final close. Serialize those owners so they cannot
-        # tear down the same subprocess transports concurrently.
-        close_lock = getattr(self, "_close_mcp_lock", None)
+        # tear down the same resources concurrently.
+        close_lock = getattr(self, "_close_lock", None)
         if close_lock is None:
-            close_lock = self._close_mcp_lock = asyncio.Lock()
+            close_lock = self._close_lock = asyncio.Lock()
         async with close_lock:
-            await self._close_mcp_unlocked()
+            await self._aclose_unlocked()
 
-    async def _close_mcp_unlocked(self) -> None:
+    async def _aclose_unlocked(self) -> None:
         errors: list[BaseException] = []
         active_task_groups = getattr(self, "_active_tasks", {})
         active_tasks = tuple({task for tasks in active_task_groups.values() for task in tasks})
@@ -1480,7 +1481,6 @@ class AgentLoop:
         cleanup_steps = (
             self.subagents.close,
             self._exec_session_manager.close_all,
-            lambda: agent_context.close_mcp(self),
         )
         for cleanup in cleanup_steps:
             try:
@@ -1499,14 +1499,20 @@ class AgentLoop:
         task.add_done_callback(self._background_tasks.discard)
 
     def _start_oauth_refresh_task(self) -> None:
-        """Start background task that refreshes OAuth tokens before they expire."""
-        if not self._mcp_servers:
-            return
-        has_auth = any(
-            hasattr(cfg, "auth") and cfg.auth
-            for cfg in self._mcp_servers.values()
+        """Start background task that refreshes OAuth tokens before they expire.
+
+        Fork: only for our headless OAuthConfig flow (device_code / client_credentials).
+        Upstream's browser flow uses `auth: "oauth"` (a string marker) and refreshes
+        reactively inside the MCP SDK provider, so we skip those here.
+        """
+        from nanobot.config.schema import OAuthConfig
+
+        mcp_servers = self.tools_config.mcp_servers
+        has_headless_auth = any(
+            isinstance(getattr(cfg, "auth", None), OAuthConfig)
+            for cfg in mcp_servers.values()
         )
-        if not has_auth:
+        if not has_headless_auth:
             return
         self.schedule_background(self._oauth_refresh_loop())
 
@@ -1521,7 +1527,6 @@ class AgentLoop:
         """
         from time import time
 
-        from nanobot.agent.tools.mcp import reload_single_server
         from nanobot.agent.tools.oauth_flow import (
             _authorization_base_url,
             _get_endpoints,
@@ -1536,10 +1541,12 @@ class AgentLoop:
             get_refresh_token,
             token_expires_at,
         )
+        from nanobot.config.schema import OAuthConfig
 
         while self._running:
-            for name, cfg in self._mcp_servers.items():
-                if not hasattr(cfg, "auth") or not cfg.auth:
+            for name, cfg in self.tools_config.mcp_servers.items():
+                # Only our headless OAuthConfig flow; skip upstream's "oauth" marker.
+                if not isinstance(getattr(cfg, "auth", None), OAuthConfig):
                     continue
                 try:
                     expires_at = token_expires_at(name)
@@ -1598,17 +1605,17 @@ class AgentLoop:
                                 name, name,
                             )
 
-                    if refreshed and name in self._mcp_stacks:
-                        try:
-                            await reload_single_server(
-                                self, self.tools, name,
-                                reason="oauth token refreshed",
-                            )
-                        except Exception as reload_exc:
-                            logger.warning(
-                                "MCP server '{}' reload after OAuth refresh failed: {}",
-                                name, reload_exc,
-                            )
+                    if refreshed:
+                        # The fresh token is now on disk. The live connection keeps
+                        # its old bearer until it next reconnects (open_single_server
+                        # re-runs _resolve_oauth_token), which the MCP SDK triggers on
+                        # the first 401 after expiry. #5343 moved MCP lifecycle into
+                        # MCPProvider, so the agent loop no longer force-reloads the
+                        # connection here — this matches upstream's reactive refresh.
+                        logger.debug(
+                            "OAuth token for '{}' refreshed on disk; live session "
+                            "picks it up on next reconnect", name,
+                        )
                 except Exception as e:
                     logger.warning("OAuth refresh failed for '{}': {}", name, e)
 
@@ -2486,7 +2493,6 @@ class AgentLoop:
         """Process an external message directly and return the outbound payload."""
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
-        await self._connect_mcp()
         metadata: dict[str, Any] = {}
         if not persist_user_message:
             metadata[turn_continuation.SKIP_USER_PERSIST_META] = True

@@ -202,15 +202,24 @@ git commit -m "..."
 
 These are intentional divergences from `HKUDS/nanobot`. Apply them on top of upstream's shape (see "Conflict-resolution principle" above). When upstream absorbs one, move it down to the "Absorbed upstream" log.
 
-### MCP OAuth machinery (~entirely orthogonal to upstream — no shape conflict)
+### MCP OAuth machinery — headless complement to upstream's native browser OAuth
+
+As of the #5316 sync, upstream ships its **own** native MCP OAuth: browser-only
+(WebUI-driven, authorization_code + PKCE via the MCP SDK's `OAuthClientProvider`),
+selected by `auth: "oauth"` (a string marker) with tokens stored outside config.
+It has **no** device_code, **no** client_credentials, **no** CLI, and explicitly
+refuses headless/background auth. Our Docker containers have no browser, so we
+**keep our fork machinery as the headless complement** and the two coexist,
+selected by the *type* of `cfg.auth`. (#5343 also moved MCP lifecycle out of
+AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 
 | Area | What we keep | Why |
 |------|-------------|-----|
-| `agent/tools/oauth_flow.py`, `oauth_tokens.py` | Entire files (upstream-untouched) | OAuth device-flow + dynamic client registration + token storage |
-| `agent/tools/mcp.py` | `_resolve_oauth_token` function + call site at top of upstream's `connect_single_server` that injects `Authorization: Bearer …` into HTTP transport headers | Talk to OAuth 2.1 remote MCP servers. Token re-resolves on every reconnect because upstream's `_refresh_terminated_server` calls `connect_single_server` again — refresh-token rotation happens for free. |
-| `agent/loop.py` | `_start_oauth_refresh_task` + `_oauth_refresh_loop` | Refresh OAuth tokens before expiry |
-| `cli/mcp_auth.py` | `mcp_auth` Typer command + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers (own module, registered in `commands.py` via `app.command("mcp-auth")(mcp_auth)`, mirroring upstream's `cli/provider.py` / `cli/webui.py` split) | Interactive OAuth setup for remote MCP servers; kept out of `commands.py` so CLI-area syncs don't conflict on our block |
-| `config/schema.py` | `OAuthConfig` class + `MCPServerConfig.auth` field | Wire OAuth into MCP server config |
+| `agent/tools/oauth_flow.py`, `oauth_tokens.py` | Entire files (upstream-untouched) | Headless device_code + client_credentials flows, dynamic client registration, token storage |
+| `agent/tools/mcp.py` | `_resolve_oauth_token` + call site inside upstream's `open_single_server`: when `cfg.auth` is an `OAuthConfig` (not the `"oauth"` string), resolve a bearer and inject it into `request_headers` (used by both sse `httpx_client_factory` and streamableHttp `http_client_kwargs`). Upstream's `oauth_auth` httpx.Auth path handles `auth == "oauth"`. | Coexist by auth-type: our headless bearer vs upstream's browser SDK auth. Token re-resolves on every reconnect (rotation for free). |
+| `agent/loop.py` | `_start_oauth_refresh_task` + `_oauth_refresh_loop`, reading `self.tools_config.mcp_servers` (post-#5343; `self._mcp_servers` is gone) and gated to `isinstance(cfg.auth, OAuthConfig)` | Proactively refresh headless tokens on disk before expiry. NB: the old immediate-reload optimization (`reload_single_server`) was **dropped** — #5343 moved MCP lifecycle to `MCPProvider`, so the live session picks up the refreshed token on its next reconnect (reactive, matching upstream). |
+| `cli/mcp_auth.py` | `mcp_auth` Typer command + `_mcp_discover_and_register` / `_mcp_auth_device_code` / `_mcp_auth_client_credentials` helpers (own module, registered in `commands.py` via `app.command("mcp-auth")(mcp_auth)`) | The headless auth entry point upstream lacks (containers/NAT/no-browser) |
+| `config/schema.py` | `OAuthConfig` class + union field `auth: OAuthConfig \| Literal["oauth"] \| None` | `"oauth"` → upstream browser flow; `OAuthConfig` object → our headless flows |
 
 ### Per-subagent provider/model override (clean composition inside upstream's factory/loop)
 
