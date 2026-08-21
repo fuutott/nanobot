@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { MouseEvent as ReactMouseEvent, ReactElement } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -63,7 +63,13 @@ import {
   type ChatGroupLabels,
 } from "@/lib/chat-groups";
 import { deriveTemporaryChatTitle } from "@/lib/temporary-chat";
-import { clearDraggedSession, writeDraggedSession } from "@/lib/session-drag";
+import { sessionHandleColor } from "@/lib/session-handle";
+import {
+  clearDraggedSession,
+  hasDraggedSession,
+  readDraggedSession,
+  writeDraggedSession,
+} from "@/lib/session-drag";
 import { cn } from "@/lib/utils";
 import type { ChatSummary, SidebarDensity, SidebarSortMode } from "@/lib/types";
 
@@ -71,6 +77,7 @@ const INITIAL_VISIBLE_SESSIONS = 160;
 const VISIBLE_SESSIONS_INCREMENT = 160;
 const ACTION_MENU_CONTENT_CLASS = "w-[11rem] min-w-[11rem] whitespace-nowrap";
 const COLLAPSED_PANE_GROUPS_STORAGE_KEY = "nanobot-webui.collapsed-pane-groups.v1";
+const DETACH_PANE_DROP_TARGET = "__sidebar-standalone__";
 
 interface SidebarActionMenuController {
   openId: string | null;
@@ -97,8 +104,10 @@ function SidebarItemTooltip({
 
 function SidebarSelectionTrack({
   active,
+  handle,
 }: {
   active: boolean;
+  handle: ChatSummary["handle"];
 }) {
   return (
     <span
@@ -106,11 +115,35 @@ function SidebarSelectionTrack({
       data-active={active ? "true" : "false"}
       aria-hidden
       className={cn(
-        "pointer-events-none absolute inset-x-0 bottom-0 h-0.5 origin-left rounded-full bg-current",
+        "pointer-events-none absolute inset-x-0 bottom-0 h-0.5 origin-left rounded-full",
         "transition-transform duration-200 ease-out motion-reduce:transition-none",
         active ? "scale-x-100" : "scale-x-0",
       )}
+      style={{
+        backgroundColor: handle ? sessionHandleColor(handle.id) : "currentColor",
+      }}
     />
+  );
+}
+
+function SidebarSessionHandle({ handle }: { handle: ChatSummary["handle"] }) {
+  if (!handle) return null;
+  return (
+    <span
+      data-sidebar-session-handle
+      className="flex max-w-20 shrink-0 items-center overflow-hidden whitespace-nowrap text-[11px] font-medium leading-5"
+    >
+      <span
+        data-sidebar-session-handle-underline
+        className="inline border-b-2 text-foreground"
+        style={{
+          "--sidebar-session-handle-color": sessionHandleColor(handle.id),
+          borderBottomColor: "var(--sidebar-session-handle-color)",
+        } as CSSProperties}
+      >
+        @{handle.name}
+      </span>
+    </span>
   );
 }
 
@@ -154,12 +187,43 @@ export interface SidebarPaneGroup {
     key: string;
     chatId: string;
     title: string;
+    handle?: ChatSummary["handle"];
   }>;
 }
 
 export interface SidebarDeleteItem {
   key: string;
   label: string;
+}
+
+function droppablePaneKey(
+  dataTransfer: DataTransfer,
+  group: SidebarPaneGroup,
+): string | null {
+  if (group.panes.length >= MAX_WORKBENCH_PANES
+    || !hasDraggedSession(dataTransfer)) return null;
+  const paneKey = readDraggedSession(dataTransfer);
+  if (!paneKey || group.panes.some((pane) => pane.key === paneKey)) return null;
+  return paneKey;
+}
+
+function detachablePaneSource(
+  dataTransfer: DataTransfer,
+  groups: Record<string, SidebarPaneGroup>,
+): { paneKey: string; tabKey: string } | null {
+  if (!hasDraggedSession(dataTransfer)) return null;
+  const paneKey = readDraggedSession(dataTransfer);
+  if (!paneKey) return null;
+  const source = Object.values(groups).find((group) => (
+    (group.visible ?? group.panes.length > 1)
+    && group.panes.some((pane) => pane.key === paneKey)
+  ));
+  return source ? { paneKey, tabKey: source.tabKey } : null;
+}
+
+function isWorkbenchTabSurface(target: EventTarget | null): boolean {
+  return target instanceof Element
+    && target.closest("[data-workbench-tab-surface]") !== null;
 }
 
 interface ChatListProps {
@@ -256,11 +320,23 @@ export const ChatList = memo(function ChatList({
   const [collapsedPaneGroups, setCollapsedPaneGroups] = useState<Set<string>>(
     readCollapsedPaneGroups,
   );
+  const [paneDropTarget, setPaneDropTarget] = useState<string | null>(null);
   const [deleteSelectionMode, setDeleteSelectionMode] = useState(false);
   const [openActionMenuId, setOpenActionMenuId] = useState<string | null>(null);
   const [selectedDeleteKeys, setSelectedDeleteKeys] = useState<Set<string>>(
     () => new Set(),
   );
+  const deleteSelectionAnchorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const clearPaneDropTarget = () => setPaneDropTarget(null);
+    window.addEventListener("dragend", clearPaneDropTarget);
+    window.addEventListener("drop", clearPaneDropTarget);
+    return () => {
+      window.removeEventListener("dragend", clearPaneDropTarget);
+      window.removeEventListener("drop", clearPaneDropTarget);
+    };
+  }, []);
   const deleteItemsByKey = useMemo(() => {
     const items = new Map<string, SidebarDeleteItem>();
     for (const group of Object.values(paneGroups)) {
@@ -374,6 +450,7 @@ export const ChatList = memo(function ChatList({
       if (event.key !== "Escape") return;
       setDeleteSelectionMode(false);
       setSelectedDeleteKeys(new Set());
+      deleteSelectionAnchorRef.current = null;
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -483,15 +560,40 @@ export const ChatList = memo(function ChatList({
   const updated = new Set(updatedChatIds);
   const compact = density === "compact";
   const firstProjectGroupIndex = limitedGroups.findIndex((group) => group.kind === "project");
+  const selectableDeleteKeys = Array.from(new Set(limitedGroups.flatMap((group) => (
+    group.sessions.flatMap((session) => {
+      const paneGroup = paneGroups[session.key];
+      const isWorkbenchTab = paneGroup?.visible
+        ?? ((paneGroup?.panes.length ?? 0) > 1);
+      return isWorkbenchTab
+        ? paneGroup?.panes.map((pane) => pane.key) ?? [session.key]
+        : [session.key];
+    })
+  ))));
 
   const beginDeleteSelection = (keys: string[]) => {
+    const validKeys = keys.filter((key) => deleteItemsByKey.has(key));
     setDeleteSelectionMode(true);
-    setSelectedDeleteKeys(new Set(keys.filter((key) => deleteItemsByKey.has(key))));
+    setSelectedDeleteKeys(new Set(validKeys));
+    deleteSelectionAnchorRef.current = validKeys[0] ?? null;
   };
-  const toggleDeleteSelection = (keys: string[]) => {
+  const toggleDeleteSelection = (
+    keys: string[],
+    shiftKey = false,
+    targetKey = keys[0],
+  ) => {
+    const validKeys = keys.filter((key) => deleteItemsByKey.has(key));
+    const anchorKey = deleteSelectionAnchorRef.current;
+    const range = shiftKey && anchorKey && targetKey
+      ? selectionRange(selectableDeleteKeys, anchorKey, targetKey)
+      : null;
     setSelectedDeleteKeys((current) => {
       const next = new Set(current);
-      const validKeys = keys.filter((key) => deleteItemsByKey.has(key));
+      if (range) {
+        for (const key of range) next.add(key);
+        for (const key of validKeys) next.add(key);
+        return next;
+      }
       const remove = validKeys.length > 0 && validKeys.every((key) => next.has(key));
       for (const key of validKeys) {
         if (remove) next.delete(key);
@@ -499,10 +601,12 @@ export const ChatList = memo(function ChatList({
       }
       return next;
     });
+    if (!range) deleteSelectionAnchorRef.current = targetKey ?? null;
   };
   const closeDeleteSelection = () => {
     setDeleteSelectionMode(false);
     setSelectedDeleteKeys(new Set());
+    deleteSelectionAnchorRef.current = null;
   };
   const requestDeleteItems = (items: SidebarDeleteItem[]) => {
     if (items.length === 0) return;
@@ -523,7 +627,63 @@ export const ChatList = memo(function ChatList({
     <div className="h-full min-h-0 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain scrollbar-thin scrollbar-track-transparent">
       <div
         data-chat-list-content
-        className="relative min-w-0 space-y-3 px-2 py-1.5"
+        data-pane-detach-target={
+          paneDropTarget === DETACH_PANE_DROP_TARGET ? "true" : undefined
+        }
+        onDragEnter={(event) => {
+          if (isWorkbenchTabSurface(event.target)) {
+            setPaneDropTarget((current) => (
+              current === DETACH_PANE_DROP_TARGET ? null : current
+            ));
+            return;
+          }
+          const source = onDetachPane && !deleteSelectionMode
+            ? detachablePaneSource(event.dataTransfer, paneGroups)
+            : null;
+          if (!source) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setPaneDropTarget(DETACH_PANE_DROP_TARGET);
+        }}
+        onDragOver={(event) => {
+          if (isWorkbenchTabSurface(event.target)) {
+            setPaneDropTarget((current) => (
+              current === DETACH_PANE_DROP_TARGET ? null : current
+            ));
+            return;
+          }
+          const source = onDetachPane && !deleteSelectionMode
+            ? detachablePaneSource(event.dataTransfer, paneGroups)
+            : null;
+          if (!source) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setPaneDropTarget(DETACH_PANE_DROP_TARGET);
+        }}
+        onDragLeave={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+          setPaneDropTarget((current) => (
+            current === DETACH_PANE_DROP_TARGET ? null : current
+          ));
+        }}
+        onDrop={(event) => {
+          if (isWorkbenchTabSurface(event.target)) return;
+          const source = onDetachPane && !deleteSelectionMode
+            ? detachablePaneSource(event.dataTransfer, paneGroups)
+            : null;
+          if (!source || !onDetachPane) return;
+          event.preventDefault();
+          setPaneDropTarget(null);
+          clearDraggedSession();
+          onDetachPane(source.tabKey, source.paneKey);
+        }}
+        className={cn(
+          "relative min-w-0 space-y-3 rounded-panel px-2 py-1.5",
+          "transition-[background-color,box-shadow]",
+          paneDropTarget === DETACH_PANE_DROP_TARGET
+            && "bg-primary/[0.05] ring-1 ring-inset ring-primary/25",
+        )}
       >
         {temporarySessions.length > 0 ? (
           <TemporaryChatSection
@@ -633,15 +793,59 @@ export const ChatList = memo(function ChatList({
                           }}
                           data-sidebar-tab-group="true"
                           data-pane-group-collapsed={paneGroupCollapsed ? "true" : undefined}
+                          data-pane-drop-target={
+                            paneDropTarget === resolvedPaneGroup.tabKey ? "true" : undefined
+                          }
                           className="relative my-1.5 min-w-0"
                         >
                           <div
                             data-workbench-tab-surface
+                            onDragEnter={(event) => {
+                              const paneKey = onAttachPane && !deleteSelectionMode
+                                ? droppablePaneKey(event.dataTransfer, resolvedPaneGroup)
+                                : null;
+                              if (!paneKey) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              event.dataTransfer.dropEffect = "move";
+                              setPaneDropTarget(resolvedPaneGroup.tabKey);
+                            }}
+                            onDragOver={(event) => {
+                              const paneKey = onAttachPane && !deleteSelectionMode
+                                ? droppablePaneKey(event.dataTransfer, resolvedPaneGroup)
+                                : null;
+                              if (!paneKey) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              event.dataTransfer.dropEffect = "move";
+                              setPaneDropTarget(resolvedPaneGroup.tabKey);
+                            }}
+                            onDragLeave={(event) => {
+                              const nextTarget = event.relatedTarget;
+                              if (nextTarget instanceof Node
+                                && event.currentTarget.contains(nextTarget)) return;
+                              setPaneDropTarget((current) => (
+                                current === resolvedPaneGroup.tabKey ? null : current
+                              ));
+                            }}
+                            onDrop={(event) => {
+                              const paneKey = onAttachPane && !deleteSelectionMode
+                                ? droppablePaneKey(event.dataTransfer, resolvedPaneGroup)
+                                : null;
+                              if (!paneKey || !onAttachPane) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setPaneDropTarget(null);
+                              clearDraggedSession();
+                              onAttachPane(paneKey, resolvedPaneGroup.tabKey);
+                            }}
                             className={cn(
-                              "min-w-0",
+                              "min-w-0 transition-[background-color,box-shadow]",
                               projectMode && "-ms-0.5",
                               deleteSelectionMode && (tabSelected || tabPartiallySelected)
                                 && "ring-1 ring-inset ring-sidebar-foreground/25",
+                              paneDropTarget === resolvedPaneGroup.tabKey
+                                && "bg-primary/[0.09] ring-2 ring-inset ring-primary/35 dark:bg-primary/[0.14]",
                             )}
                           >
                               <WorkbenchTabHeader
@@ -654,7 +858,11 @@ export const ChatList = memo(function ChatList({
                                 selected={tabSelected}
                                 partiallySelected={tabPartiallySelected}
                                 onToggle={() => togglePaneGroup(s.key)}
-                                onToggleSelection={() => toggleDeleteSelection(tabDeleteKeys)}
+                                onToggleSelection={(shiftKey) => toggleDeleteSelection(
+                                  tabDeleteKeys,
+                                  shiftKey,
+                                  tabDeleteKeys[0],
+                                )}
                                 onRequestRename={onRequestRenameTab
                                   ? () => onRequestRenameTab(s.key, title)
                                   : undefined}
@@ -718,7 +926,12 @@ export const ChatList = memo(function ChatList({
                       : updated.has(s.chatId) && !topicActive
                         ? "updated"
                         : null;
-                    const canDragSession = !topicActive && !deleteSelectionMode;
+                    const hasPaneMoveTarget = Boolean(onAttachPane)
+                      && paneGroupTargets.some((target) => (
+                        target.key !== paneGroup?.tabKey && !target.atCapacity
+                      ));
+                    const canDragSession = !deleteSelectionMode
+                      && (!topicActive || hasPaneMoveTarget);
                     const actionMenuId = `session:${s.key}`;
                     return (
                       <li
@@ -736,7 +949,7 @@ export const ChatList = memo(function ChatList({
                             actionMenus.openFromContextMenu(event, actionMenuId)
                           )}
                           className={cn(
-                            "group flex min-w-0 max-w-full items-center gap-1 rounded-[0.65rem] px-2 text-[13px]",
+                            "group flex min-w-0 max-w-full items-center gap-1 rounded-control px-2 text-[13px]",
                             SIDEBAR_SELECTION_ITEM_CLASS,
                             compact ? "min-h-7" : "min-h-8",
                             topicActive
@@ -749,9 +962,9 @@ export const ChatList = memo(function ChatList({
                           <SidebarItemTooltip label={tooltipTitle}>
                             <button
                               type="button"
-                              onClick={() => {
+                              onClick={(event) => {
                                 if (deleteSelectionMode) {
-                                  toggleDeleteSelection(tabDeleteKeys);
+                                  toggleDeleteSelection(tabDeleteKeys, event.shiftKey, s.key);
                                   return;
                                 }
                                 if (!topicActive) onSelect(s.key);
@@ -780,27 +993,29 @@ export const ChatList = memo(function ChatList({
                                   partial={tabPartiallySelected}
                                 />
                               ) : null}
-                              <span className="min-w-0 flex-1 overflow-hidden">
-                                {projectMode ? (
-                                  <span className="relative flex w-full min-w-0 items-baseline gap-2">
-                                    <span className="min-w-0 flex-1 truncate font-medium leading-5">
-                                      {title}
-                                    </span>
-                                    {isPinned ? <PinnedChatIndicator /> : null}
+                                <span className="min-w-0 flex-1 overflow-hidden">
+                                  {projectMode ? (
+                                    <span className="relative flex w-full min-w-0 items-baseline gap-2">
+                                      <SidebarSessionHandle handle={s.handle} />
+                                      <span className="min-w-0 flex-1 truncate font-medium leading-5">
+                                        {title}
+                                      </span>
+                                      {isPinned ? <PinnedChatIndicator /> : null}
                                     {timestamp ? (
                                       <span className="shrink-0 text-[11.5px] font-medium text-muted-foreground/58">
                                         {timestamp}
                                       </span>
                                     ) : null}
-                                    <SidebarSelectionTrack active={topicActive} />
+                                    <SidebarSelectionTrack active={topicActive} handle={s.handle} />
                                   </span>
                                 ) : (
                                   <span className="relative flex w-full min-w-0 items-center gap-1.5">
+                                    <SidebarSessionHandle handle={s.handle} />
                                     <span className="min-w-0 flex-1 truncate font-medium leading-5">
                                       {title}
                                     </span>
                                     {isPinned ? <PinnedChatIndicator /> : null}
-                                    <SidebarSelectionTrack active={topicActive} />
+                                    <SidebarSelectionTrack active={topicActive} handle={s.handle} />
                                   </span>
                                 )}
                                 {showPreview ? (
@@ -866,9 +1081,7 @@ export const ChatList = memo(function ChatList({
                               {paneGroup && onCreateTab ? (
                                 <DropdownMenuItem onSelect={() => onCreateTab(s.key)}>
                                   <PanelsTopLeft className="h-4 w-4 shrink-0" aria-hidden />
-                                  {t("workbench.createGroup", {
-                                    defaultValue: "Create group",
-                                  })}
+                                  {t("workbench.createGroup")}
                                 </DropdownMenuItem>
                               ) : null}
                               {paneGroup && onAttachPane ? (
@@ -993,7 +1206,7 @@ function WorkbenchTabHeader({
   selected: boolean;
   partiallySelected: boolean;
   onToggle: () => void;
-  onToggleSelection: () => void;
+  onToggleSelection: (shiftKey: boolean) => void;
   onRequestRename?: () => void;
   onDissolve?: () => void;
   onRequestDelete: () => void;
@@ -1010,14 +1223,17 @@ function WorkbenchTabHeader({
       data-workbench-tab
       onContextMenu={(event) => actionMenus.openFromContextMenu(event, actionMenuId)}
       className={cn(
-        "group/tab flex min-w-0 items-center gap-0.5 rounded-[0.65rem] px-1.5 text-sidebar-foreground/85",
+        "group/tab flex min-w-0 items-center gap-0.5 rounded-control px-1.5 text-sidebar-foreground/85",
         collapsed ? "min-h-6" : "min-h-7",
       )}
     >
       <SidebarItemTooltip label={title}>
         <button
           type="button"
-          onClick={deleteSelectionMode ? onToggleSelection : onToggle}
+          onClick={(event) => {
+            if (deleteSelectionMode) onToggleSelection(event.shiftKey);
+            else onToggle();
+          }}
           draggable={false}
           aria-label={t("workbench.tabAria", { title })}
           aria-expanded={deleteSelectionMode ? undefined : !collapsed}
@@ -1073,7 +1289,7 @@ function WorkbenchTabHeader({
               {onDissolve ? (
                 <DropdownMenuItem onSelect={onDissolve}>
                   <Ungroup className="h-4 w-4 shrink-0" />
-                  {t("workbench.dissolveTab", { defaultValue: "Dissolve group" })}
+                  {t("workbench.dissolveTab")}
                 </DropdownMenuItem>
               ) : null}
               <DropdownMenuItem
@@ -1082,9 +1298,7 @@ function WorkbenchTabHeader({
                 className="whitespace-nowrap"
               >
                 <Trash2 className="h-4 w-4 shrink-0" />
-                {t("workbench.deleteConversations", {
-                  defaultValue: "Delete all chats",
-                })}
+                {t("workbench.deleteConversations")}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -1165,7 +1379,11 @@ function ActivePaneRows({
   ) => void;
   deleteSelectionMode: boolean;
   selectedDeleteKeys: ReadonlySet<string>;
-  onToggleDeleteSelection: (keys: string[]) => void;
+  onToggleDeleteSelection: (
+    keys: string[],
+    shiftKey?: boolean,
+    targetKey?: string,
+  ) => void;
   onBeginDeleteSelection: (keys: string[]) => void;
   actionMenuPortalContainer?: HTMLElement | null;
   actionMenus: SidebarActionMenuController;
@@ -1175,10 +1393,7 @@ function ActivePaneRows({
   return (
     <ul
       id={id}
-      aria-label={t("workbench.panesInTab", {
-        defaultValue: "Panes in {{title}}",
-        title: tabTitle,
-      })}
+      aria-label={t("workbench.panesInTab", { title: tabTitle })}
       className="mt-0.5 space-y-0.5 rounded-es-[14px] border-s-2 border-sidebar-foreground/25 pb-1"
     >
       {panes.map((pane) => {
@@ -1188,14 +1403,14 @@ function ActivePaneRows({
           : updated.has(pane.chatId) && !active
             ? "updated"
             : null;
-        const paneActionsLabel = t("workbench.paneActions", {
-          defaultValue: "{{title}} pane actions",
-          title: pane.title,
-        });
+        const paneActionsLabel = t("workbench.paneActions", { title: pane.title });
         const selected = selectedDeleteKeys.has(pane.key);
         const isPinned = pinned.has(pane.key);
         const isArchived = archived.has(pane.key);
-        const canDragSession = !active && !deleteSelectionMode;
+        const hasPaneMoveTarget = Boolean(onAttachPane)
+          && moveTargets.some((target) => !target.atCapacity);
+        const canDragSession = !deleteSelectionMode
+          && (!active || Boolean(onDetachPane) || hasPaneMoveTarget);
         const actionMenuId = `pane:${pane.key}`;
 
         return (
@@ -1210,7 +1425,7 @@ function ActivePaneRows({
                 actionMenus.openFromContextMenu(event, actionMenuId)
               )}
               className={cn(
-                "group/pane flex min-w-0 max-w-full items-center gap-1 rounded-[0.65rem] px-2 text-[13px]",
+                "group/pane flex min-w-0 max-w-full items-center gap-1 rounded-control px-2 text-[13px]",
                 SIDEBAR_SELECTION_ITEM_CLASS,
                 compact ? "min-h-7" : "min-h-8",
                 active
@@ -1220,12 +1435,14 @@ function ActivePaneRows({
                   && "bg-sidebar-accent/55 text-sidebar-accent-foreground",
               )}
             >
-              <SidebarItemTooltip label={pane.title}>
+              <SidebarItemTooltip
+                label={pane.handle ? `@${pane.handle.name} · ${pane.title}` : pane.title}
+              >
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={(event) => {
                     if (deleteSelectionMode) {
-                      onToggleDeleteSelection([pane.key]);
+                      onToggleDeleteSelection([pane.key], event.shiftKey, pane.key);
                       return;
                     }
                     onSelectPane?.(group.tabKey, pane.key);
@@ -1252,9 +1469,10 @@ function ActivePaneRows({
                     <SelectionIndicator checked={selected} partial={false} />
                   ) : null}
                   <span className="relative flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                    <SidebarSessionHandle handle={pane.handle} />
                     <span className="min-w-0 flex-1 truncate">{pane.title}</span>
                     {isPinned ? <PinnedChatIndicator /> : null}
-                    <SidebarSelectionTrack active={active} />
+                    <SidebarSelectionTrack active={active} handle={pane.handle} />
                   </span>
                 </button>
               </SidebarItemTooltip>
@@ -1305,10 +1523,7 @@ function ActivePaneRows({
                   {onDetachPane ? (
                     <DropdownMenuItem onSelect={() => onDetachPane(group.tabKey, pane.key)}>
                       <Unplug className="h-4 w-4 shrink-0" />
-                      {t("workbench.detachPane", {
-                        defaultValue: "Remove",
-                        title: pane.title,
-                      })}
+                      {t("workbench.detachPane", { title: pane.title })}
                     </DropdownMenuItem>
                   ) : null}
                   {onAttachPane ? (
@@ -1340,6 +1555,15 @@ function ActivePaneRows({
       })}
     </ul>
   );
+}
+
+function selectionRange(order: string[], anchorKey: string, targetKey: string): string[] | null {
+  const anchorIndex = order.indexOf(anchorKey);
+  const targetIndex = order.indexOf(targetKey);
+  if (anchorIndex < 0 || targetIndex < 0) return null;
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  return order.slice(start, end + 1);
 }
 
 function SelectionIndicator({
@@ -1374,7 +1598,7 @@ function MoveToGroupSubmenu({
     <DropdownMenuSub>
       <DropdownMenuSubTrigger>
         <MoveRight className="h-4 w-4 shrink-0" aria-hidden />
-        {t("workbench.moveTo", { defaultValue: "Move to" })}
+        {t("workbench.moveTo")}
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent>
         {targets.map((target) => (

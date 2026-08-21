@@ -33,11 +33,22 @@
     --input: 40 8% 90.5%;
     --ring: 0 0% 3.9%;
     --inline-token-highlight: #ef8e30;
+    --session-handle-lightness: 0.5;
+    --session-handle-chroma: 0.12;
     --temporary-control-active: #ef8e30;
     --temporary-accent: 24 95% 53%;
     --temporary-foreground: 17 88% 32%;
     --temporary-border: 17 88% 40%;
     --radius: 0.4375rem;
+    /* Shared shape scale: marks, compact content, controls, and progressively larger surfaces. */
+    --radius-mark: 0.25rem;
+    --radius-compact: 0.5rem;
+    --radius-control: 0.75rem;
+    --radius-floating: 1.125rem;
+    --radius-panel: 1.375rem;
+    --radius-modal: 1.375rem;
+    --radius-prominent: 1.75rem;
+    --radius-pill: 9999px;
     --sidebar: 40 8% 96.8%;
     --sidebar-foreground: 0 0% 3.9%;
     --sidebar-selected: 40 1% 89.4%;
@@ -72,6 +83,8 @@
     --input: var(--border);
     --ring: 0 0% 83.1%;
     --inline-token-highlight: #ef8e30;
+    --session-handle-lightness: 0.75;
+    --session-handle-chroma: 0.11;
     --temporary-control-active: #ef8e30;
     --temporary-accent: 24 95% 53%;
     --temporary-foreground: 32 98% 73%;
@@ -121,7 +134,7 @@
 
   *::-webkit-scrollbar-thumb {
     background-color: var(--scrollbar-thumb);
-    border-radius: 9999px;
+    border-radius: var(--radius-pill);
   }
 
   *::-webkit-scrollbar-thumb:hover {
@@ -567,7 +580,7 @@
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
     background-color: hsl(var(--muted-foreground) / 0.4);
-    border-radius: 9999px;
+    border-radius: var(--radius-pill);
   }
   .scrollbar-track-transparent {
     scrollbar-gutter: stable;
@@ -661,7 +674,7 @@
 /*
  * Composer controls compress against their actual container, not the viewport.
  * Permission state has priority over the model label; both retain their full
- * accessible names and title text when their visible labels are shortened.
+ * accessible names and tooltip text when their visible labels are shortened.
  */
 .thread-composer-surface {
   container-name: thread-composer;
@@ -685,6 +698,21 @@
 .thread-composer-model-badge:not([data-switching="true"]):active
   > .composer-model-pill {
   transform: scale(0.98);
+}
+
+@keyframes preset-name-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+
+  35% {
+    transform: translateX(-2px);
+  }
+
+  70% {
+    transform: translateX(2px);
+  }
 }
 
 @keyframes composer-model-pill-viewport-enter {

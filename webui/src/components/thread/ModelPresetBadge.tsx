@@ -8,13 +8,18 @@ import {
 } from "react";
 import { CircleHelp, Sparkles } from "lucide-react";
 
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useLogoFallback } from "@/hooks/useLogoFallback";
 import { inferProviderFromModelName, providerBrand } from "@/lib/provider-brand";
 import { cn } from "@/lib/utils";
 
 export interface ModelPresetOption {
   name: string;
-  label: string;
   model?: string | null;
   provider?: string | null;
 }
@@ -99,7 +104,6 @@ export function ModelPresetBadge({
   const activePreset: ModelPresetOption = {
     ...(listedIndex >= 0 ? modelPresets[listedIndex] : undefined),
     name: activeName,
-    label: label || modelPresets[listedIndex]?.label || activeName,
     model: modelDetail ?? modelPresets[listedIndex]?.model,
     provider: provider || modelPresets[listedIndex]?.provider,
   };
@@ -115,6 +119,9 @@ export function ModelPresetBadge({
   const pillStride = pillHeight + PILL_GAP_PX;
   const [motion, setMotion] = useState<PresetMotion | null>(null);
   const gestureRef = useRef<PresetGesture | null>(null);
+  const clickAnimationFrameRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
+  const suppressClickTimerRef = useRef<number | null>(null);
 
   function clearGesture() {
     const gesture = gestureRef.current;
@@ -128,7 +135,17 @@ export function ModelPresetBadge({
       clearGesture();
       setMotion(null);
     }
-    return clearGesture;
+    return () => {
+      clearGesture();
+      if (clickAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(clickAnimationFrameRef.current);
+        clickAnimationFrameRef.current = null;
+      }
+      if (suppressClickTimerRef.current !== null) {
+        window.clearTimeout(suppressClickTimerRef.current);
+        suppressClickTimerRef.current = null;
+      }
+    };
   }, [canSwitch]);
 
   useEffect(() => {
@@ -141,6 +158,42 @@ export function ModelPresetBadge({
     const raw = -(clientY - gesture.startY) / pillStride;
     gesture.step = stepWithHysteresis(raw, gesture.step);
     setMotion({ index: gesture.baseIndex + gesture.step, remainder: raw - gesture.step, settling: false });
+  }
+
+  function suppressFollowingClick() {
+    suppressClickRef.current = true;
+    if (suppressClickTimerRef.current !== null) {
+      window.clearTimeout(suppressClickTimerRef.current);
+    }
+    suppressClickTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false;
+      suppressClickTimerRef.current = null;
+    }, 0);
+  }
+
+  function cycleToNextPreset() {
+    if (!canSwitch || motion) return;
+    const nextVirtualIndex = currentIndex + 1;
+    const next = presets[wrapIndex(nextVirtualIndex, presets.length)];
+    if (!next || next.name === activeName) return;
+
+    // Mount the same five-pill track one step before its destination, then
+    // settle it into place so clicks share the drag interaction's motion.
+    setMotion({ index: nextVirtualIndex, remainder: -1, settling: false });
+    clickAnimationFrameRef.current = window.requestAnimationFrame(() => {
+      clickAnimationFrameRef.current = null;
+      setMotion({ index: nextVirtualIndex, remainder: 0, settling: true });
+      onPresetChange?.(next.name);
+    });
+  }
+
+  function handleClick() {
+    if (interactive) {
+      onClick?.();
+      return;
+    }
+    if (suppressClickRef.current) return;
+    cycleToNextPreset();
   }
 
   function handlePointerDown(event: PointerEvent<HTMLElement>) {
@@ -187,6 +240,7 @@ export function ModelPresetBadge({
     if (event.currentTarget.hasPointerCapture?.(gesture.pointerId)) {
       event.currentTarget.releasePointerCapture?.(gesture.pointerId);
     }
+    if (gesture.active) suppressFollowingClick();
     if (!commit || !gesture.active) {
       setMotion(null);
       return;
@@ -215,8 +269,10 @@ export function ModelPresetBadge({
   const previewPreset = presets[previewIndex];
   const Container = interactive || canSwitch ? "button" : "span";
   const trackOffset = motion ? -pillStride * (2 + motion.remainder) : 0;
+  const tooltipLabel = fallbackModelName
+    || [...new Set([label, modelDetail, providerLabel].filter(Boolean))].join(" · ");
 
-  return (
+  const badge = (
     <Container
       data-switching={motion ? "true" : undefined}
       data-settling={motion?.settling ? "true" : undefined}
@@ -225,10 +281,11 @@ export function ModelPresetBadge({
       aria-valuemax={canSwitch ? presets.length - 1 : undefined}
       aria-valuemin={canSwitch ? 0 : undefined}
       aria-valuenow={canSwitch ? previewIndex : undefined}
-      aria-valuetext={canSwitch ? previewPreset?.label || label : undefined}
+      aria-valuetext={canSwitch ? previewPreset?.name || label : undefined}
       role={canSwitch ? "spinbutton" : undefined}
+      tabIndex={!interactive && !canSwitch ? 0 : undefined}
       type={interactive || canSwitch ? "button" : undefined}
-      onClick={interactive ? onClick : undefined}
+      onClick={interactive || canSwitch ? handleClick : undefined}
       onKeyDown={handleKeyDown}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -257,7 +314,6 @@ export function ModelPresetBadge({
         label={label}
         modelDetail={modelDetail}
         provider={provider}
-        providerLabel={providerLabel}
         needsSetup={needsSetup}
         fallbackModelName={fallbackModelName}
         isHero={isHero}
@@ -290,7 +346,7 @@ export function ModelPresetBadge({
               return (
                 <PresetPill
                   key={virtualIndex}
-                  label={preset.label || preset.name}
+                  label={preset.name}
                   modelDetail={preset.model}
                   provider={preset.provider}
                   isHero={isHero}
@@ -304,6 +360,24 @@ export function ModelPresetBadge({
       ) : null}
     </Container>
   );
+
+  if (!tooltipLabel) return badge;
+  return (
+    <TooltipProvider delayDuration={500} skipDelayDuration={100}>
+      <Tooltip>
+        <TooltipTrigger asChild>{badge}</TooltipTrigger>
+        <TooltipContent
+          side="top"
+          align="center"
+          sideOffset={8}
+          collisionPadding={12}
+          className="max-w-[min(24rem,calc(100vw-2rem))] break-all"
+        >
+          {tooltipLabel}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 function PresetPill({
@@ -311,7 +385,6 @@ function PresetPill({
   label,
   modelDetail,
   provider,
-  providerLabel,
   needsSetup = false,
   fallbackModelName,
   isHero,
@@ -322,7 +395,6 @@ function PresetPill({
   label: string;
   modelDetail?: string | null;
   provider?: string | null;
-  providerLabel?: string | null;
   needsSetup?: boolean;
   fallbackModelName?: string | null;
   isHero: boolean;
@@ -336,7 +408,6 @@ function PresetPill({
     : provider || inferProviderFromModelName(modelDetail || label);
   const brand = providerBrand(inferredProvider);
   const { logoUrl, onLogoError, onLogoLoad } = useLogoFallback(brand?.logoUrls);
-  const title = [...new Set([label, modelDetail, providerLabel].filter(Boolean))].join(" · ");
   const logoTestId = offset !== undefined
     ? undefined
     : needsSetup
@@ -357,7 +428,6 @@ function PresetPill({
     <span
       data-fallback={fallbackModelName ? "true" : undefined}
       data-preset-offset={offset}
-      title={fallbackModelName || title || undefined}
       className={cn(
         "composer-model-badge composer-model-pill inline-flex h-full w-fit max-w-full min-w-0 shrink-0 items-center rounded-full border border-border/55 bg-card font-medium text-foreground/70",
         offset === undefined && "shadow-[0_2px_8px_rgba(15,23,42,0.045)]",

@@ -107,6 +107,7 @@ function makeClient() {
       };
     },
     getRunStartedAt: (chatId: string) => runStartedAtByChatId.get(chatId) ?? null,
+    getRunTurnId: (chatId: string) => latestRunTurnIdByChatId.get(chatId) ?? null,
     finishRunLocally: vi.fn((chatId: string) => {
       runStartedAtByChatId.delete(chatId);
       latestRunTurnIdByChatId.delete(chatId);
@@ -470,6 +471,54 @@ describe("ThreadShell", () => {
     expect(screen.queryByText("failed to read file")).not.toBeInTheDocument();
   });
 
+  it("hides actions for a complete assistant-only message until turn_end", async () => {
+    const client = makeClient();
+    vi.mocked(fetch).mockImplementation(async (input) => (
+      String(input).includes("websocket%3Aassistant-only-actions/webui-thread")
+        ? httpJson(transcriptFromSimpleMessages([
+            { role: "assistant", content: "old automation", turnId: "turn-old" },
+          ]))
+        : { ok: false, status: 404, json: async () => ({}) }
+    ) as Response);
+
+    render(wrap(
+      client,
+      <ThreadShell
+        session={session("assistant-only-actions")}
+        title="Assistant-only actions"
+        onToggleSidebar={() => {}}
+      />,
+    ));
+
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1));
+    const turnId = "turn-automation";
+    const startedAt = Date.now() / 1000;
+    act(() => client._emitChat("assistant-only-actions", {
+      event: "goal_status",
+      chat_id: "assistant-only-actions",
+      status: "running",
+      started_at: startedAt,
+      turn_id: turnId,
+    }));
+    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1);
+
+    act(() => client._emitChat("assistant-only-actions", {
+      event: "message",
+      chat_id: "assistant-only-actions",
+      text: "new automation",
+      turn_id: turnId,
+    }));
+    await waitFor(() => expect(screen.getByText("new automation")).toBeInTheDocument());
+    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1);
+
+    act(() => client._emitChat("assistant-only-actions", {
+      event: "turn_end",
+      chat_id: "assistant-only-actions",
+      turn_id: turnId,
+    }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(2));
+  });
+
   it("does not navigate away when clicking the chat title", async () => {
     const client = makeClient();
     const onGoHome = vi.fn();
@@ -560,8 +609,12 @@ describe("ThreadShell", () => {
       ),
     );
 
-    expect(await screen.findByTitle("Fast · gpt-5.5 · OpenAI Codex")).toBeInTheDocument();
-    expect(screen.queryByTitle("Default · deepseek-v4-pro · DeepSeek")).not.toBeInTheDocument();
+    const badge = await screen.findByLabelText("fast");
+    expect(badge).not.toHaveAttribute("title");
+    fireEvent.focus(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "fast · gpt-5.5 · OpenAI Codex",
+    );
   });
 
   it("switches through every named preset while preserving call-order priority", async () => {
@@ -596,19 +649,19 @@ describe("ThreadShell", () => {
       "preset-order",
       "/model fast",
     );
-    expect(await screen.findByText("Fast")).toBeInTheDocument();
+    expect(await screen.findByText("fast")).toBeInTheDocument();
     fireEvent.keyDown(
-      screen.getByRole("spinbutton", { name: "Fast" }),
+      screen.getByRole("spinbutton", { name: "fast" }),
       { key: "End" },
     );
     expect(client.sendSystemCommand).toHaveBeenLastCalledWith(
       "preset-order",
       "/model extra",
     );
-    expect(await screen.findByText("Extra")).toBeInTheDocument();
+    expect(await screen.findByText("extra")).toBeInTheDocument();
 
     rerender(view("fast"));
-    expect(await screen.findByText("Fast")).toBeInTheDocument();
+    expect(await screen.findByText("fast")).toBeInTheDocument();
   });
 
   it("uses the backend-resolved provider for an auto session preset", async () => {
@@ -643,11 +696,15 @@ describe("ThreadShell", () => {
       ),
     );
 
-    expect(await screen.findByTitle("Fast · gpt-4 · Company Proxy")).toBeInTheDocument();
+    const badge = await screen.findByLabelText("fast");
+    fireEvent.focus(badge);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "fast · gpt-4 · Company Proxy",
+    );
     expect(screen.queryByRole("button", { name: "Model not configured" })).not.toBeInTheDocument();
   });
 
-  it("highlights the configured model badge without replacing the preset label", async () => {
+  it("only highlights fallback model updates without replacing the preset label", async () => {
     const client = makeClient();
     render(wrap(
       client,
@@ -670,6 +727,16 @@ describe("ThreadShell", () => {
       client._emitChat("fallback-model", {
         event: "turn_model_updated",
         chat_id: "fallback-model",
+        model_name: "openai-codex/gpt-5.5",
+      });
+    });
+
+    expect(configuredBadge).not.toHaveAttribute("data-fallback");
+
+    act(() => {
+      client._emitChat("fallback-model", {
+        event: "turn_model_updated",
+        chat_id: "fallback-model",
         model_name: "deepseek/deepseek-chat",
       });
     });
@@ -681,11 +748,11 @@ describe("ThreadShell", () => {
     expect(screen.getByText("Default")).toBeInTheDocument();
     expect(screen.queryByText("deepseek-chat")).not.toBeInTheDocument();
     expect(badge).toHaveAttribute("data-fallback", "true");
-    expect(badge).toHaveAttribute(
-      "title",
-      "deepseek/deepseek-chat",
-    );
+    expect(badge).not.toHaveAttribute("title");
     expect(logo).not.toHaveAttribute("data-fallback");
+    const trigger = screen.getByLabelText("Default");
+    fireEvent.focus(trigger);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("deepseek/deepseek-chat");
 
     act(() => {
       client._emitChat("fallback-model", {
@@ -699,9 +766,9 @@ describe("ThreadShell", () => {
         screen.getByTestId("composer-model-logo-openai_codex").parentElement,
       ).not.toHaveAttribute("data-fallback");
     });
-    expect(
-      screen.getByTestId("composer-model-logo-openai_codex").parentElement,
-    ).toHaveAttribute("title", "Default · gpt-5.5 · OpenAI Codex");
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Default · gpt-5.5 · OpenAI Codex",
+    );
     expect(
       screen.getByTestId("composer-model-logo-openai_codex").parentElement,
     ).toBe(badge);
@@ -1021,7 +1088,7 @@ describe("ThreadShell", () => {
       await screen.findByRole("spinbutton", { name: "Default" }),
       { key: "ArrowDown" },
     );
-    expect(await screen.findByText("Fast")).toBeInTheDocument();
+    expect(await screen.findByText("fast")).toBeInTheDocument();
     expect(client.sendSystemCommand).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("Message input"), {
@@ -2784,6 +2851,72 @@ describe("ThreadShell", () => {
     ));
   });
 
+  it("keeps active-run timing attached to the original turn after guidance", async () => {
+    const client = makeClient();
+    const turnId = "turn-active-timing";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("websocket%3Atiming-chat/webui-thread")) {
+          return httpJson(transcriptFromSimpleMessages([{
+            role: "user",
+            content: "research this",
+            turnId,
+          }]));
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      }),
+    );
+
+    render(
+      wrap(
+        client,
+        <ThreadShell
+          session={session("timing-chat")}
+          title="Timing chat"
+          onToggleSidebar={() => {}}
+          onNewChat={() => {}}
+        />,
+      ),
+    );
+
+    await waitFor(() => expect(screen.getByText("research this")).toBeInTheDocument());
+    act(() => {
+      client._emitChat("timing-chat", {
+        event: "goal_status",
+        chat_id: "timing-chat",
+        status: "running",
+        started_at: Date.now() / 1000 - 215,
+        turn_id: turnId,
+      });
+      client._emitChat("timing-chat", {
+        event: "message",
+        chat_id: "timing-chat",
+        kind: "progress",
+        text: "web_search()",
+        turn_id: turnId,
+      });
+      client._emitChat("timing-chat", {
+        event: "message",
+        chat_id: "timing-chat",
+        text: "Continuing the search.",
+        latency_ms: 1_000,
+        turn_id: turnId,
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText("Continuing the search.")).toBeInTheDocument());
+    const input = screen.getByRole("textbox", { name: "Message input" });
+    fireEvent.change(input, { target: { value: "How is it going?" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(screen.getByText("How is it going?")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /^Working for / })).toBeInTheDocument();
+    expect(screen.queryByText("Worked for 1s")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: /^Thinking for / })).not.toBeInTheDocument();
+  });
+
   it("refreshes the current thread when the page returns to the foreground", async () => {
     const client = makeClient();
     let historyCalls = 0;
@@ -3815,7 +3948,7 @@ describe("ThreadShell", () => {
     );
   });
 
-  it("offers only same-project sessions in restricted mode", async () => {
+  it("offers sessions across projects in restricted mode", async () => {
     const client = makeClient();
     const currentScope = {
       project_path: "/projects/current",
@@ -3825,6 +3958,10 @@ describe("ThreadShell", () => {
       ...session("same-project"),
       title: "Same project",
       workspaceScope: currentScope,
+      handle: {
+        id: "handle_11111111111111111111111111111111",
+        name: "same-1111111111",
+      },
     };
     const otherProject = {
       ...session("other-project"),
@@ -3832,6 +3969,10 @@ describe("ThreadShell", () => {
       workspaceScope: {
         project_path: "/projects/other",
         access_mode: "restricted" as const,
+      },
+      handle: {
+        id: "handle_22222222222222222222222222222222",
+        name: "other-2222222222",
       },
     };
 
@@ -3850,6 +3991,7 @@ describe("ThreadShell", () => {
     fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
 
     expect(screen.getByRole("option", { name: /Same project/i })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: /Other project/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Other project/i })).toBeInTheDocument();
   });
+
 });

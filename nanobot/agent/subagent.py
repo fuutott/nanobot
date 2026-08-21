@@ -675,21 +675,32 @@ class SubagentManager:
 
         agent_workspace = self.workspace.expanduser().resolve()
         project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
+        # Fork: skills_filter whitelists which skills appear in the summary
+        # (per-subagent spawn knob). Compose it with upstream's project-workspace
+        # display-path threading.
         loader = SkillsLoader(self.workspace, disabled_skills=self.disabled_skills)
         if skills_filter is None:
-            skills_summary = loader.build_skills_summary()
+            skills_summary = loader.build_skills_summary(workspace=project_workspace)
         elif not skills_filter:
             skills_summary = ""
         else:
             # Exclude everything except the whitelisted skill names.
             allowed = set(skills_filter)
             all_names = {s["name"] for s in loader.list_skills(filter_unavailable=False)}
-            skills_summary = loader.build_skills_summary(exclude=all_names - allowed)
+            skills_summary = loader.build_skills_summary(
+                exclude=all_names - allowed,
+                workspace=project_workspace,
+            )
+        history_log = (
+            str(agent_workspace / "memory" / "history.jsonl")
+            if agent_workspace != project_workspace
+            else "memory/history.jsonl"
+        )
         return render_template(
             "agent/subagent_system.md",
             workspace=str(project_workspace),
             agent_workspace=str(agent_workspace),
-            history_log=str(agent_workspace / "memory" / "history.jsonl"),
+            history_log=history_log,
             skills_summary=skills_summary or "",
         )
 

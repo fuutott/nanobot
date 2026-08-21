@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { FilePreviewAvailabilityProvider } from "@/components/FilePreviewAvailabilityContext";
 import { FilePreviewPanel } from "@/components/FilePreviewPanel";
+import { SessionHandleLabel } from "@/components/SessionHandleLabel";
 import { PromptNavigator } from "@/components/thread/PromptNavigator";
 import { SessionInfoPopover } from "@/components/thread/SessionInfoPopover";
 import { ThreadComposer } from "@/components/thread/ThreadComposer";
@@ -216,17 +217,18 @@ function isStaleThreadSnapshot(
   return snapshot.every((message, index) => sameMessageShape(current[index], message));
 }
 
-function latestActiveTurnId(messages: UIMessage[]): string | null {
+function latestActiveTurnId(messages: UIMessage[], runStartedAt: number | null): string | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message.isStreaming && message.turnId) return message.turnId;
   }
+  if (runStartedAt === null) return null;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (
-      message.role === "user"
-      && message.deliveryStatus !== "failed"
+      message.role !== "user"
       && message.turnId
+      && message.createdAt >= runStartedAt * 1000
     ) return message.turnId;
   }
   return null;
@@ -377,7 +379,11 @@ function toModelBadgeInfo(
   const model = scopedPreset
     ? preset?.model || null
     : settings?.agent.model || modelName || null;
-  const label = preset?.label?.trim() || scopedPreset || toModelBadgeLabel(model);
+  const label = preset
+    ? preset.is_default
+      ? preset.label?.trim() || "Default"
+      : preset.name.trim()
+    : scopedPreset || toModelBadgeLabel(model);
   const rawProvider = preset?.provider
     || (!scopedPreset ? settings?.agent.provider : null)
     || null;
@@ -394,7 +400,7 @@ function toModelBadgeInfo(
   );
   return {
     label,
-    model: toModelBadgeLabel(model),
+    model: model?.trim() || null,
     provider,
     providerLabel: provider ? providerDisplayLabel(settings?.providers ?? [], provider) : null,
     needsSetup,
@@ -418,7 +424,6 @@ function modelPresetOptionsFromSettings(
       const name = preset.name.trim();
       return {
         name,
-        label: preset.label?.trim() || name,
         model: preset.model,
         provider: preset.resolved_provider || preset.provider,
       };
@@ -634,14 +639,8 @@ export function ThreadShell({
   const chatId = session?.chatId ?? null;
   const historyKey = temporary ? null : session?.key ?? null;
   const mentionSessions = useMemo(
-    () => sessions.filter((candidate) => (
-      candidate.key !== historyKey
-      && (
-        workspaceScope?.access_mode !== "restricted"
-        || candidate.workspaceScope?.project_path === workspaceScope.project_path
-      )
-    )),
-    [historyKey, sessions, workspaceScope],
+    () => sessions.filter((candidate) => candidate.key !== historyKey),
+    [historyKey, sessions],
   );
   const {
     messages: historical,
@@ -808,14 +807,20 @@ export function ThreadShell({
   const currentGoalState = messagesReady ? goalState : undefined;
   const turnActive = messagesReady && (isStreaming || currentRunStartedAt !== null);
   const restoredViewportTurnId = useMemo(
-    () => turnActive ? latestActiveTurnId(displayMessages) : null,
-    [displayMessages, turnActive],
+    () => turnActive ? latestActiveTurnId(displayMessages, currentRunStartedAt) : null,
+    [currentRunStartedAt, displayMessages, turnActive],
   );
   const rememberedViewportTurnId = chatId
     ? activeViewportTurnByChatIdRef.current.get(chatId) ?? null
     : null;
+  const canonicalRunTurnId = chatId && messagesReady && turnActive
+    ? client.getRunTurnId(chatId)
+    : null;
   const viewportTurnId = messagesReady && turnActive
-    ? rememberedViewportTurnId ?? restoredViewportTurnId
+    ? canonicalRunTurnId
+      ?? rememberedViewportTurnId
+      ?? historyActiveTurnId
+      ?? restoredViewportTurnId
     : null;
   const activeTurnStartedHere =
     viewportTurnId !== null && viewportTurnId === submittedViewportTurnId;
@@ -954,9 +959,12 @@ export function ThreadShell({
     setFallbackModelName(null);
     return client.onChat(chatId, (event) => {
       if (event.event !== "turn_model_updated") return;
-      setFallbackModelName(event.model_name);
+      const activeModel = event.model_name.trim();
+      setFallbackModelName(
+        modelBadge.model && activeModel !== modelBadge.model ? activeModel : null,
+      );
     });
-  }, [chatId, client]);
+  }, [chatId, client, modelBadge.model]);
 
   useEffect(() => {
     if (!historyKey || !chatId || loading) return;
@@ -1313,7 +1321,12 @@ export function ThreadShell({
     (content: string, images?: SendAttachment[], options?: SendOptions) => {
       setFallbackModelName(null);
       const submitted = send(content, images, withWorkspaceScope(options));
-      if (chatId && submitted && !submitted.sideChannel) {
+      if (
+        chatId
+        && submitted
+        && !submitted.sideChannel
+        && options?.continueActiveTurn !== true
+      ) {
         activeViewportTurnByChatIdRef.current.set(chatId, submitted.turnId);
         setSubmittedViewportTurnId(submitted.turnId);
       }
@@ -1441,7 +1454,7 @@ export function ThreadShell({
               : t("thread.composer.placeholderThread")
           }
           modelLabel={modelBadgeLabel}
-          modelDetail={modelBadge.model}
+          modelDetail={toModelBadgeLabel(modelBadge.model)}
           modelPreset={activeModelPreset}
           modelPresets={modelPresetOptions}
           onModelPresetChange={handleModelPresetChange}
@@ -1488,7 +1501,7 @@ export function ThreadShell({
               : t("thread.composer.placeholderHero")
           }
           modelLabel={modelBadgeLabel}
-          modelDetail={modelBadge.model}
+          modelDetail={toModelBadgeLabel(modelBadge.model)}
           modelPreset={activeModelPreset}
           modelPresets={modelPresetOptions}
           onModelPresetChange={handleModelPresetChange}
@@ -1545,6 +1558,7 @@ export function ThreadShell({
   const threadHeader = !hideHeader ? (
     <ThreadHeader
       title={title}
+      handle={temporary || hideHeaderTitle ? null : session?.handle}
       onToggleSidebar={onToggleSidebar}
       theme={theme}
       onToggleTheme={onToggleTheme}
@@ -1568,6 +1582,20 @@ export function ThreadShell({
   return (
     <section ref={shellRef} className="relative flex min-h-0 flex-1 overflow-hidden">
       <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        {hideHeaderTitle && !temporary && session?.handle ? (
+          <div
+            aria-label={`Session @${session.handle.name}`}
+            className="flex h-8 shrink-0 items-center px-3 text-[12px]"
+          >
+            <span
+              className="shrink-0"
+            >
+              <SessionHandleLabel id={session.handle.id}>
+                @{session.handle.name}
+              </SessionHandleLabel>
+            </span>
+          </div>
+        ) : null}
         {headerPortalTarget === undefined ? threadHeader : null}
         <FilePreviewAvailabilityProvider
           resolve={historyKey ? resolveFilePreviewAvailability : undefined}

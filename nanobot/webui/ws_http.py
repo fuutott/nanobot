@@ -28,6 +28,10 @@ from nanobot.command.builtin import builtin_command_palette
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
 from nanobot.security.workspace_access import WorkspaceScope
+from nanobot.session.manager import SessionManager
+from nanobot.session.session_handles import (
+    SessionHandleResolver,
+)
 from nanobot.triggers.local_types import LocalTrigger
 from nanobot.webui.file_preview import (
     WebUIFilePreviewError,
@@ -97,6 +101,7 @@ from nanobot.webui.session_automations import (
     session_automation_jobs,
     session_automations_payload,
 )
+from nanobot.webui.session_context import session_context_payload
 from nanobot.webui.session_list_index import (
     WEBUI_SESSION_INDEX_INTERNAL_FIELDS,
     indexed_workspace_scope,
@@ -215,7 +220,6 @@ if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.websocket.runtime import WebSocketConfig
     from nanobot.cron.service import CronService
-    from nanobot.session.manager import SessionManager
     from nanobot.triggers.local_store import LocalTriggerStore
     from nanobot.webui.settings_services import WebUISettingsServices
 
@@ -254,10 +258,10 @@ def _request_query(request: WsRequest) -> dict[str, list[str]]:
     return query
 
 
-def _default_model_name_from_config() -> str | None:
+def _default_model_name_from_config(config_path: Path | None = None) -> str | None:
     try:
         from nanobot.config.loader import load_config
-        model = load_config().resolve_preset().model.strip()
+        model = load_config(config_path).resolve_preset().model.strip()
         return model or None
     except Exception as e:
         logger.debug("bootstrap model_name could not load from config: {}", e)
@@ -266,6 +270,7 @@ def _default_model_name_from_config() -> str | None:
 
 def _resolve_bootstrap_model_name(
     runtime_name: Callable[[], str | None] | None,
+    config_path: Path | None = None,
 ) -> str:
     if runtime_name is not None:
         try:
@@ -277,7 +282,7 @@ def _resolve_bootstrap_model_name(
                 stripped = raw.strip()
                 if stripped:
                     return stripped
-    return _default_model_name_from_config() or ""
+    return _default_model_name_from_config(config_path) or ""
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +608,10 @@ class GatewayHTTPHandler:
                 "limits": self.ingress.bootstrap_limits(
                     max_frame_bytes=self.config.max_message_bytes,
                 ),
-                "model_name": _resolve_bootstrap_model_name(self.runtime_model_name),
+                "model_name": _resolve_bootstrap_model_name(
+                    self.runtime_model_name,
+                    self.settings.config.path,
+                ),
                 "runtime_surface": self._runtime_surface,
                 "runtime_capabilities": self._capabilities,
             }
@@ -634,7 +642,10 @@ class GatewayHTTPHandler:
             "limits": self.ingress.bootstrap_limits(
                 max_frame_bytes=self.config.max_message_bytes,
             ),
-            "model_name": _resolve_bootstrap_model_name(self.runtime_model_name),
+            "model_name": _resolve_bootstrap_model_name(
+                self.runtime_model_name,
+                self.settings.config.path,
+            ),
             "runtime_surface": self._runtime_surface,
             "runtime_capabilities": self._capabilities,
         }
@@ -671,6 +682,10 @@ class GatewayHTTPHandler:
         if m:
             return self._handle_webui_thread_get(request, m.group(1))
 
+        m = re.match(r"^/api/sessions/([^/]+)/context$", got)
+        if m:
+            return await self._handle_session_context_get(request, m.group(1))
+
         m = re.match(r"^/api/sessions/([^/]+)/file-preview$", got)
         if m:
             return self._handle_file_preview(request, m.group(1))
@@ -685,6 +700,24 @@ class GatewayHTTPHandler:
 
         return None
 
+    async def _handle_session_context_get(self, request: WsRequest, key: str) -> Response:
+        if not self.check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        decoded_key = _decode_api_key(key)
+        if decoded_key is None:
+            return _http_error(400, "invalid session key")
+        if not _is_websocket_channel_session_key(decoded_key):
+            return _http_error(404, "session not found")
+        if self.session_manager is None:
+            return _http_error(503, "session manager unavailable")
+        session = await asyncio.to_thread(
+            self.session_manager.read_session_snapshot,
+            decoded_key,
+        )
+        if session is None:
+            return _http_error(404, "session not found")
+        return _http_json_response(session_context_payload(session))
+
     async def _handle_sessions_list(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
@@ -698,9 +731,10 @@ class GatewayHTTPHandler:
 
     def _sessions_list_payload(self) -> dict[str, Any]:
         assert self.session_manager is not None
-        sessions = list_webui_sessions(self.session_manager)
         from nanobot.session.webui_turns import websocket_turn_wall_started_at
 
+        sessions = list_webui_sessions(self.session_manager)
+        handles = SessionHandleResolver(self.session_manager).list_all_by_key()
         cleaned: list[dict[str, Any]] = []
         default_scope: WorkspaceScope | None = None
         for s in sessions:
@@ -725,6 +759,9 @@ class GatewayHTTPHandler:
                 default_scope=default_scope,
             )
             row["workspace_scope"] = scope.payload()
+            handle = handles.get(key)
+            if handle is not None:
+                row["handle"] = handle.public_payload()
             cleaned.append(row)
         return {"sessions": cleaned}
 
@@ -1236,9 +1273,9 @@ class GatewayHTTPHandler:
         if _is_local_browser_request(connection, request.headers):
             return True
         try:
-            from nanobot.config.loader import load_config
-
-            return bool(load_config().tools.webui_allow_remote_package_install)
+            return bool(
+                self.settings.config.load().tools.webui_allow_remote_package_install
+            )
         except Exception:
             self._log.exception("failed to load remote package install policy")
             return False
@@ -1252,11 +1289,14 @@ class GatewayHTTPHandler:
         if raw_enabled not in {"true", "false"}:
             return _http_error(400, "enabled must be true or false")
         try:
-            action = set_webui_skill_enabled(
-                self.skills_workspace_path,
-                name,
-                enabled=raw_enabled == "true",
-                disabled_skills=self.disabled_skills,
+            action = self.settings.config.run_serialized(
+                lambda config_path: set_webui_skill_enabled(
+                    self.skills_workspace_path,
+                    name,
+                    enabled=raw_enabled == "true",
+                    disabled_skills=self.disabled_skills,
+                    config_path=config_path,
+                )
             )
         except SkillManagementError as exc:
             return _http_error(exc.status, exc.message)
@@ -1280,10 +1320,13 @@ class GatewayHTTPHandler:
             return _http_error(403, "remote skill deletion is disabled")
         name = _query_first(_request_query(request), "name") or ""
         try:
-            action = delete_webui_skill(
-                self.skills_workspace_path,
-                name,
-                disabled_skills=self.disabled_skills,
+            action = self.settings.config.run_serialized(
+                lambda config_path: delete_webui_skill(
+                    self.skills_workspace_path,
+                    name,
+                    disabled_skills=self.disabled_skills,
+                    config_path=config_path,
+                )
             )
         except SkillManagementError as exc:
             return _http_error(exc.status, exc.message)

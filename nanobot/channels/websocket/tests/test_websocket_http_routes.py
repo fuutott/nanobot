@@ -16,12 +16,14 @@ import pytest
 from nanobot.bus.events import OutboundMessage
 from nanobot.channels.base import BaseChannel
 from nanobot.channels.websocket.runtime import WebSocketChannel, WebSocketConfig
+from nanobot.config.loader import load_config, save_config
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 from nanobot.optional_features import InstallResult
 from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 from nanobot.session.manager import Session, SessionManager
+from nanobot.session.session_handles import SessionHandleResolver
 from nanobot.triggers.local_store import LocalTriggerStore
 from nanobot.webui.gateway_services import GatewayServices, build_gateway_services
 
@@ -636,6 +638,7 @@ async def test_webui_skill_management_routes(
         *,
         enabled: bool,
         disabled_skills: set[str],
+        config_path: Path | None = None,
     ) -> dict[str, Any]:
         assert workspace == tmp_path
         assert name == "custom-skill"
@@ -648,6 +651,7 @@ async def test_webui_skill_management_routes(
         name: str,
         *,
         disabled_skills: set[str],
+        config_path: Path | None = None,
     ) -> dict[str, Any]:
         assert workspace == tmp_path
         assert name == "custom-skill"
@@ -926,10 +930,6 @@ async def test_webui_skill_install_honors_remote_install_opt_in(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = MagicMock()
-    policy.tools.webui_allow_remote_package_install = True
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: policy)
-
     async def install(
         source: str,
         skill_id: str,
@@ -956,6 +956,9 @@ async def test_webui_skill_install_honors_remote_install_opt_in(
         workspace_path=tmp_path,
         port=_free_port(),
     )
+    policy = load_config(channel.gateway.settings.config.path)
+    policy.tools.webui_allow_remote_package_install = True
+    save_config(policy, channel.gateway.settings.config.path)
     response = await _webui_mutate(
         channel,
         "skill.install",
@@ -2210,10 +2213,6 @@ async def test_sessions_list_only_returns_websocket_sessions_by_default(
     }
     sm.save(scoped)
 
-    def fail_metadata_read(_key: str) -> None:
-        raise AssertionError("the session list must use its own index metadata")
-
-    monkeypatch.setattr(sm, "read_session_metadata", fail_metadata_read)
     channel = _ch(bus, session_manager=sm, workspace_path=tmp_path, port=29906)
     server_task = asyncio.create_task(channel.start())
     try:
@@ -2230,6 +2229,16 @@ async def test_sessions_list_only_returns_websocket_sessions_by_default(
         # Slack / Lark rows would be non-resumable from the browser.
         assert keys == {"websocket:alpha", "websocket:beta"}
         rows = {row["key"]: row for row in sessions}
+        handles = {
+            handle.session_key: handle
+            for handle in SessionHandleResolver(sm).list_all()
+        }
+        assert rows["websocket:alpha"]["handle"] == handles[
+            "websocket:alpha"
+        ].public_payload()
+        assert rows["websocket:beta"]["handle"] == handles[
+            "websocket:beta"
+        ].public_payload()
         assert rows["websocket:beta"]["workspace_scope"]["project_path"] == str(
             project.resolve()
         )
@@ -3699,7 +3708,7 @@ def test_authenticated_bootstrap_returns_distinct_api_token(bus: MagicMock) -> N
 def test_bootstrap_prefers_runtime_model_name(bus: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "nanobot.webui.ws_http._default_model_name_from_config",
-        lambda: "from-disk",
+        lambda _config_path=None: "from-disk",
     )
     channel = _ch(bus, host="127.0.0.1", runtime_model_name=lambda: "  live/model  ")
     resp = channel.gateway.http._handle_bootstrap(_LOCAL, _LOCAL_BROWSER_REQ)
@@ -3711,7 +3720,7 @@ def test_bootstrap_prefers_runtime_model_name(bus: MagicMock, monkeypatch: pytes
 def test_bootstrap_falls_back_when_runtime_returns_empty(bus: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "nanobot.webui.ws_http._default_model_name_from_config",
-        lambda: "from-disk",
+        lambda _config_path=None: "from-disk",
     )
     channel = _ch(bus, host="127.0.0.1", runtime_model_name=lambda: "   ")
     resp = channel.gateway.http._handle_bootstrap(_LOCAL, _LOCAL_BROWSER_REQ)
@@ -3723,7 +3732,7 @@ def test_bootstrap_falls_back_when_runtime_returns_empty(bus: MagicMock, monkeyp
 def test_bootstrap_falls_back_when_runtime_raises(bus: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "nanobot.webui.ws_http._default_model_name_from_config",
-        lambda: "from-disk",
+        lambda _config_path=None: "from-disk",
     )
 
     def boom():

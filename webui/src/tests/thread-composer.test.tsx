@@ -128,14 +128,24 @@ const MCP_PRESETS: McpPresetInfo[] = [
 ];
 
 function session(chatId: string, title: string, preview = ""): ChatSummary {
+  const key = `websocket:${chatId}`;
+  const handleId = Array.from(chatId)
+    .map((character) => character.codePointAt(0)?.toString(16).padStart(4, "0") ?? "0000")
+    .join("")
+    .padEnd(32, "0")
+    .slice(0, 32);
   return {
-    key: `websocket:${chatId}`,
+    key,
     channel: "websocket",
     chatId,
     createdAt: null,
     updatedAt: null,
     title,
     preview,
+    handle: {
+      id: `handle_${handleId}`,
+      name: title,
+    },
   };
 }
 
@@ -307,9 +317,9 @@ function ascii(bytes: Uint8Array, offset: number, length: number): string {
 }
 
 const MODEL_PRESETS = [
-  { name: "kimi", label: "Kimi", provider: "moonshot" },
-  { name: "dflash", label: "DFlash", provider: "deepseek" },
-  { name: "dspro", label: "DS Pro", provider: "deepseek" },
+  { name: "kimi", provider: "moonshot" },
+  { name: "dflash", provider: "deepseek" },
+  { name: "dspro", provider: "deepseek" },
 ];
 
 function renderPresetComposer(variant: "thread" | "hero" = "thread") {
@@ -317,7 +327,7 @@ function renderPresetComposer(variant: "thread" | "hero" = "thread") {
   render(
     <ThreadComposer
       onSend={vi.fn()}
-      modelLabel="Kimi"
+      modelLabel="kimi"
       modelPreset="kimi"
       modelProvider="moonshot"
       modelPresets={MODEL_PRESETS}
@@ -327,7 +337,7 @@ function renderPresetComposer(variant: "thread" | "hero" = "thread") {
     />,
   );
   return {
-    badge: screen.getByRole("spinbutton", { name: "Kimi" }),
+    badge: screen.getByRole("spinbutton", { name: "kimi" }),
     onPresetChange,
   };
 }
@@ -554,11 +564,58 @@ describe("ThreadComposer", () => {
     expect(input.className).toContain("min-h-[50px]");
     expect(input.className).toContain("text-[16px]");
     expect(input.parentElement?.parentElement?.className).toContain("max-w-[49.5rem]");
-    expect(input.parentElement?.parentElement?.className).toContain("rounded-[22px]");
+    expect(input.parentElement?.parentElement?.className).toContain("rounded-panel");
     expect(input.parentElement?.parentElement?.className).not.toContain("shadow-");
     expect(screen.getByRole("button", { name: "Attach files" }).className).toContain("bg-card");
     expect(screen.getByRole("button", { name: "Send message" }).className).toContain("bg-foreground");
     expect(screen.queryByText(/Enter to send/)).not.toBeInTheDocument();
+  });
+
+  it("shows model details in the shared tooltip without a native title", async () => {
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        modelLabel="gpt-4o"
+        modelDetail="gpt-4o"
+        modelProvider="openai"
+        modelProviderLabel="OpenAI"
+        placeholder="Type your message..."
+      />,
+    );
+
+    const badge = screen.getByLabelText("gpt-4o");
+    expect(badge).not.toHaveAttribute("title");
+    fireEvent.focus(badge);
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("gpt-4o · OpenAI");
+  });
+
+  it("smoothly cycles to the next preset on click", () => {
+    vi.useFakeTimers();
+    let runFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      runFrame = callback;
+      return 1;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    const { badge, onPresetChange } = renderPresetComposer();
+
+    fireEvent.click(badge);
+
+    expect(badge).toHaveAttribute("data-switching", "true");
+    const track = screen.getByTestId("composer-model-pill-track");
+    expect(track).not.toHaveAttribute("data-settling");
+    expect(track).toHaveStyle({ transform: "translate3d(0, -40px, 0)" });
+
+    act(() => runFrame?.(16));
+
+    expect(onPresetChange).toHaveBeenCalledWith("dflash");
+    expect(badge).toHaveAttribute("data-settling", "true");
+    expect(track).toHaveAttribute("data-settling", "true");
+    expect(track).toHaveStyle({ transform: "translate3d(0, -80px, 0)" });
+
+    act(() => vi.advanceTimersByTime(260));
+    expect(badge).not.toHaveAttribute("data-switching");
   });
 
   it("scrolls complete preset pills after a left-button long press and wraps", () => {
@@ -572,7 +629,6 @@ describe("ThreadComposer", () => {
     });
     badge.dispatchEvent(idleTouchMove);
     expect(idleTouchMove.defaultPrevented).toBe(false);
-    fireEvent.click(badge);
     pointerDown(badge);
     fireEvent.pointerMove(badge, { clientY: 80, pointerId: 7, pointerType: "mouse" });
     act(() => vi.advanceTimersByTime(500));
@@ -604,7 +660,7 @@ describe("ThreadComposer", () => {
     expect(Array.from(pills).every((pill) => pill.querySelector("img"))).toBe(true);
     expect(Array.from(badge.querySelectorAll("img")).every((image) => !image.draggable)).toBe(true);
     const centeredPill = track.querySelector<HTMLElement>("[data-preset-offset='0']");
-    expect(centeredPill).toHaveTextContent("Kimi");
+    expect(centeredPill).toHaveTextContent("kimi");
     expect(centeredPill).toHaveStyle({ transform: "scale(1.0800)" });
     expect(
       track.querySelector<HTMLElement>("[data-preset-offset='1']"),
@@ -615,13 +671,13 @@ describe("ThreadComposer", () => {
       pointerId: 7,
       pointerType: "mouse",
     });
-    expect(track.querySelector("[data-preset-offset='0']")).toHaveTextContent("Kimi");
+    expect(track.querySelector("[data-preset-offset='0']")).toHaveTextContent("kimi");
     fireEvent.pointerMove(badge, {
       clientY: 123,
       pointerId: 7,
       pointerType: "mouse",
     });
-    expect(track.querySelector("[data-preset-offset='0']")).toHaveTextContent("DS Pro");
+    expect(track.querySelector("[data-preset-offset='0']")).toHaveTextContent("dspro");
     fireEvent.pointerUp(badge, {
       clientY: 123,
       pointerId: 7,
@@ -629,6 +685,8 @@ describe("ThreadComposer", () => {
     });
 
     expect(onPresetChange).toHaveBeenCalledWith("dspro");
+    fireEvent.click(badge);
+    expect(onPresetChange).toHaveBeenCalledTimes(1);
     expect(badge).toHaveAttribute("data-settling", "true");
     expect(track).toHaveAttribute("data-settling", "true");
     act(() => {
@@ -1747,6 +1805,7 @@ describe("ThreadComposer", () => {
 
     expect(onSend).toHaveBeenCalledWith("参考 @收费设计", undefined, {
       sessionMentions: [{
+        id: session("pricing", "收费设计").handle?.id,
         name: "收费设计",
         session_key: "websocket:pricing",
         title: "收费设计",
@@ -1800,6 +1859,7 @@ describe("ThreadComposer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(onSend).toHaveBeenCalledWith("Compare @收费设计 notes", undefined, {
       sessionMentions: [{
+        id: session("pricing", "收费设计").handle?.id,
         name: "收费设计",
         session_key: "websocket:pricing",
         title: "收费设计",
@@ -1807,7 +1867,7 @@ describe("ThreadComposer", () => {
     });
   });
 
-  it("rejects session drops that are unavailable to the composer", () => {
+  it("rejects self-session drops that are unavailable to the composer", () => {
     render(
       <ThreadComposer
         onSend={vi.fn()}
@@ -1827,40 +1887,6 @@ describe("ThreadComposer", () => {
     expect(fireEvent.dragEnter(input, { dataTransfer })).toBe(true);
     expect(fireEvent.dragOver(input, { dataTransfer })).toBe(true);
     expect(screen.queryByTestId("composer-session-drag-preview")).not.toBeInTheDocument();
-  });
-
-  it("disambiguates duplicate and capability-colliding session names", () => {
-    render(
-      <ThreadComposer
-        onSend={vi.fn()}
-        placeholder="Type your message..."
-        cliApps={CLI_APPS}
-        mcpPresets={MCP_PRESETS}
-        sessions={[
-          ...["a", "b"].map((chatId) => session(chatId, "Plan")),
-          session("blender-chat", "Blender", "3D notes"),
-        ]}
-      />,
-    );
-
-    const input = screen.getByLabelText("Message input");
-    fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
-
-    const palette = screen.getByRole("listbox", { name: "Mentions" });
-    expect(within(palette).getAllByRole("group").map((group) => (
-      group.getAttribute("aria-label")
-    ))).toEqual(["CLI apps", "MCP services", "Nanobot conversations"]);
-    const options = screen.getAllByRole("option", { name: /Plan @Plan/i });
-    expect(options.map((option) => option.textContent)).toEqual([
-      expect.stringContaining("@Plan"),
-      expect.stringContaining("@Plan-chat"),
-    ]);
-    expect(screen.getByRole("group", { name: "Nanobot conversations" })).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "CLI apps" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Blender @Blender-chat Reference/i }))
-      .toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Blender @blender Use/i }))
-      .toBeInTheDocument();
   });
 
   it("releases the eight-session limit when a mention is removed", () => {
@@ -1932,6 +1958,7 @@ describe("ThreadComposer", () => {
 
     expect(onSend).toHaveBeenCalledWith("@Plan", undefined, {
       sessionMentions: [{
+        id: session("z-target", "Plan").handle?.id,
         name: "Plan",
         session_key: "websocket:z-target",
         title: "Plan",
