@@ -1,14 +1,26 @@
-__pycache__
+# NOTE: bare patterns (e.g. `node_modules/`) match only at the context root.
+# Use `**/` to exclude nested copies too — otherwise webui/node_modules (~370MB)
+# and tui/node_modules get shipped to the daemon as build context. The Dockerfile's
+# node webui-builder stage installs deps fresh inside the image, so host copies of
+# node_modules/dist are never needed for the build.
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.egg-info
-dist/
-build/
+
+# Node / frontend build artifacts (webui/, tui/) — rebuilt in the webui-builder stage
+**/node_modules/
+**/dist/
+**/.vite/
+**/coverage/
+*.tsbuildinfo
 nanobot/web/dist/
-.git
+bridge/dist/
+
+# VCS, secrets, local scratch
+.git/
 .env
 .assets
-node_modules/
-bridge/dist/
 workspace/
+build/
