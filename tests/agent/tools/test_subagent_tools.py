@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nanobot.agent.context import TranscriptInput
 from nanobot.agent.tools.context import RequestContext
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import GenerationSettings
@@ -376,9 +377,10 @@ async def test_inline_spawn_waits_for_concurrency_capacity(tmp_path):
 @pytest.mark.asyncio
 async def test_runner_executes_inline_spawn_batch_concurrently(tmp_path):
     """Adjacent blocking consultations should share one concurrent tool batch."""
-    from nanobot.agent.runner import AgentRunner, AgentRunSpec
+    from nanobot.agent.hook import AgentHook, AgentHookContext
     from nanobot.agent.subagent import SubagentManager
     from nanobot.agent.tools.context import RequestContext, request_context
+    from nanobot.agent.tools.execution import execute_tool_calls
     from nanobot.agent.tools.registry import ToolRegistry
     from nanobot.agent.tools.spawn import SpawnTool
     from nanobot.bus.queue import MessageBus
@@ -410,14 +412,6 @@ async def test_runner_executes_inline_spawn_batch_concurrently(tmp_path):
     tools = ToolRegistry()
     tools.register(SpawnTool(manager))
     runtime = _runtime(MagicMock())
-    spec = AgentRunSpec(
-        initial_messages=[],
-        tools=tools,
-        runtime=runtime,
-        max_iterations=1,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        concurrent_tools=True,
-    )
     calls = [
         ToolCallRequest(
             id="spawn-1",
@@ -437,7 +431,15 @@ async def test_runner_executes_inline_spawn_batch_concurrently(tmp_path):
         session_key="test:c1",
         runtime=runtime,
     )):
-        execution = asyncio.create_task(AgentRunner()._execute_tools(spec, calls, {}, {}))
+        execution = asyncio.create_task(execute_tool_calls(
+            tools,
+            calls,
+            concurrent=True,
+            external_lookup_counts={},
+            workspace_violation_counts={},
+            hook=AgentHook(),
+            context=AgentHookContext(iteration=0, messages=[], session_key="test:c1"),
+        ))
         await asyncio.wait_for(both_entered.wait(), timeout=1.0)
         release.set()
         results, events = await execution
@@ -567,7 +569,10 @@ async def test_agent_loop_syncs_updated_max_iterations_before_run(tmp_path):
     loop.runner.run = AsyncMock(side_effect=fake_run)
     loop.max_iterations = 55
 
-    await loop._run_agent_loop([], runtime=loop.llm_runtime())
+    await loop._run_agent_loop(
+        TranscriptInput(history=[], current_message=None),
+        runtime=loop.llm_runtime(),
+    )
 
     loop.runner.run.assert_awaited_once()
 
@@ -608,7 +613,7 @@ async def test_drain_pending_no_block_when_no_subagents(tmp_path):
 
     runtime = loop.llm_runtime()
     await loop._run_agent_loop(
-        [{"role": "user", "content": "test"}],
+        TranscriptInput(history=[{"role": "user", "content": "test"}], current_message=None),
         runtime=runtime,
         session=None,
         request_context=RequestContext(channel="test", chat_id="c1", runtime=runtime),
@@ -667,7 +672,7 @@ async def test_terminal_drain_timeout(tmp_path):
 
     runtime = loop.llm_runtime()
     await loop._run_agent_loop(
-        [{"role": "user", "content": "test"}],
+        TranscriptInput(history=[{"role": "user", "content": "test"}], current_message=None),
         runtime=runtime,
         session=session,
         request_context=RequestContext(
@@ -741,7 +746,7 @@ async def test_terminal_drain_reuses_one_timeout_budget(tmp_path):
     loop.subagents._running_tasks["sub-deadline-1"] = hang_task
 
     await loop._run_agent_loop(
-        [{"role": "user", "content": "test"}],
+        TranscriptInput(history=[{"role": "user", "content": "test"}], current_message=None),
         runtime=loop.llm_runtime(),
         session=session,
         pending_queue=pending_queue,

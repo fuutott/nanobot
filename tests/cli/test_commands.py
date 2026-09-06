@@ -17,6 +17,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.turn_delivery import TurnDeliveryFactory
 from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.queue import MessageBus
 from nanobot.cli import commands as cli_commands
 from nanobot.cli import gateway_runtime as cli_gateway_runtime
 from nanobot.cli import provider as provider_commands
@@ -799,7 +800,7 @@ def test_provider_login_can_set_xai_grok_as_main_provider(tmp_path):
 
     saved = Config.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
     assert saved.agents.defaults.provider == "xai_grok"
-    assert saved.agents.defaults.model == "xai-grok/grok-4.5"
+    assert saved.agents.defaults.model == "xai-grok/grok-4.6"
     assert saved.agents.defaults.context_window_tokens == 500_000
     assert saved.agents.defaults.model_preset is None
     assert make_provider(saved).__class__.__name__ == "XAIGrokProvider"
@@ -1837,12 +1838,6 @@ def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime,
     assert passed_config.workspace_path == workspace_path
 
 
-def test_heartbeat_retains_recent_messages_by_default():
-    config = Config()
-
-    assert config.gateway.heartbeat.keep_recent_messages == 8
-
-
 @pytest.mark.parametrize(
     "content, expected",
     [
@@ -2101,7 +2096,7 @@ def _patch_cli_command_runtime(
         monkeypatch.setattr("nanobot.config.paths.get_cron_dir", get_cron_dir)
 
 
-def test_heartbeat_empty_response_still_retains_recent_messages(
+def test_heartbeat_empty_response_is_not_evaluated(
     monkeypatch, tmp_path: Path,
 ) -> None:
     config_file = _write_instance_config(tmp_path)
@@ -2119,21 +2114,9 @@ def test_heartbeat_empty_response_still_retains_recent_messages(
     bus.publish_outbound = AsyncMock()
     seen: dict[str, object] = {}
 
-    class _FakeSession:
-        def retain_recent_legal_suffix(self, limit: int) -> None:
-            seen["retained_limit"] = limit
-
     class _FakeSessionManager:
         def __init__(self, _workspace: Path) -> None:
-            self.session = _FakeSession()
-            seen["heartbeat_session"] = self.session
-
-        def get_or_create(self, key: str) -> _FakeSession:
-            seen["session_key"] = key
-            return self.session
-
-        def save(self, session: _FakeSession) -> None:
-            seen["saved_session"] = session
+            pass
 
         def list_sessions(self) -> list[dict[str, str]]:
             return [{"key": "telegram:u1"}]
@@ -2199,9 +2182,6 @@ def test_heartbeat_empty_response_still_retains_recent_messages(
     response = asyncio.run(cron.on_job(CronJob(id="heartbeat", name="heartbeat")))
 
     assert response is None
-    assert seen["session_key"] == "heartbeat"
-    assert seen["retained_limit"] == config.gateway.heartbeat.keep_recent_messages
-    assert seen["saved_session"] is seen["heartbeat_session"]
 
 
 def test_webui_yes_creates_config_and_enables_local_websocket(
@@ -2309,6 +2289,10 @@ def test_webui_dev_starts_vite_sidecar_and_gateway(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr("nanobot.cli.webui.run_webui_dev_server", fake_dev_server)
     _patch_webui_managed_gateway(monkeypatch, seen)
+    monkeypatch.setattr(
+        "nanobot.cli.webui._prepare_webui_bundle_for_gateway",
+        lambda *_args, **_kwargs: pytest.fail("dev mode must not inspect the bundled WebUI"),
+    )
     monkeypatch.setattr(
         "nanobot.cli.webui._attach_to_background_gateway",
         lambda runtime, **kwargs: seen.update(
@@ -2654,12 +2638,14 @@ def test_webui_foreground_attaches_to_existing_managed_gateway(monkeypatch, tmp_
     assert seen["lease_release_wait_for_stop"] is False
 
 
-def test_attach_to_background_gateway_detaches_on_ctrl_c(capsys) -> None:
+def test_attach_to_background_gateway_detaches_on_ctrl_c(capsys, tmp_path: Path) -> None:
     stopped = False
+    log_path = tmp_path / "gateway.log"
+    log_path.touch()
 
     class _FakeRuntime:
         def status(self):
-            return SimpleNamespace(running=True)
+            return SimpleNamespace(running=True, log_path=log_path)
 
         def stop(self):
             nonlocal stopped
@@ -2679,10 +2665,88 @@ def test_attach_to_background_gateway_detaches_on_ctrl_c(capsys) -> None:
     assert "WebUI launcher detached" in rendered
 
 
-def test_attach_to_background_gateway_checks_owned_sidecar() -> None:
+def test_attach_to_background_gateway_follows_only_new_logs(capsys, tmp_path: Path) -> None:
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text("historical log\n", encoding="utf-8")
+    polls = 0
+
     class _FakeRuntime:
         def status(self):
-            return SimpleNamespace(running=True)
+            return SimpleNamespace(running=True, log_path=log_path)
+
+    def _append_then_interrupt(_seconds: float) -> None:
+        nonlocal polls
+        if polls == 0:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("[websocket] live log\n")
+            polls += 1
+            return
+        raise KeyboardInterrupt
+
+    cli_webui_support._attach_to_background_gateway(
+        _FakeRuntime(),
+        sleep=_append_then_interrupt,
+    )
+
+    output = capsys.readouterr().out
+    assert "[websocket] live log" in output
+    assert "historical log" not in output
+
+
+def test_read_new_gateway_logs_recovers_after_truncation(tmp_path: Path) -> None:
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text("a much longer historical log line\n", encoding="utf-8")
+    cursor = cli_webui_support._start_gateway_log_cursor(log_path)
+    log_path.write_text("fresh log\n", encoding="utf-8")
+
+    lines = cli_webui_support._read_new_gateway_logs(log_path, cursor)
+
+    assert lines == ["fresh log"]
+    assert cursor.offset == log_path.stat().st_size
+
+
+def test_read_new_gateway_logs_detects_fast_rewrite_past_offset(tmp_path: Path) -> None:
+    log_path = tmp_path / "gateway.log"
+    log_path.write_text("historical log\n", encoding="utf-8")
+    cursor = cli_webui_support._start_gateway_log_cursor(log_path)
+    log_path.write_text("first fresh log\nsecond fresh log\n", encoding="utf-8")
+
+    lines = cli_webui_support._read_new_gateway_logs(log_path, cursor)
+
+    assert lines == ["first fresh log", "second fresh log"]
+
+
+def test_read_new_gateway_logs_waits_for_complete_utf8_line(tmp_path: Path) -> None:
+    log_path = tmp_path / "gateway.log"
+    log_path.touch()
+    cursor = cli_webui_support._start_gateway_log_cursor(log_path)
+    encoded = "模型 ready\n".encode()
+    log_path.write_bytes(encoded[:2])
+
+    assert cli_webui_support._read_new_gateway_logs(log_path, cursor) == []
+
+    with log_path.open("ab") as handle:
+        handle.write(encoded[2:])
+
+    assert cli_webui_support._read_new_gateway_logs(log_path, cursor) == ["模型 ready"]
+
+
+def test_read_new_gateway_logs_tolerates_missing_file(tmp_path: Path) -> None:
+    log_path = tmp_path / "missing.log"
+    cursor = cli_webui_support._start_gateway_log_cursor(log_path)
+    lines = cli_webui_support._read_new_gateway_logs(log_path, cursor)
+
+    assert lines == []
+    assert cursor.offset == 0
+
+
+def test_attach_to_background_gateway_checks_owned_sidecar(tmp_path: Path) -> None:
+    log_path = tmp_path / "gateway.log"
+    log_path.touch()
+
+    class _FakeRuntime:
+        def status(self):
+            return SimpleNamespace(running=True, log_path=log_path)
 
     def sidecar_exited() -> None:
         raise WebUIDevError("WebUI development server exited unexpectedly (code 23)")
@@ -2808,7 +2872,7 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
     )
     monkeypatch.setattr("nanobot.cli.commands.AgentLoop", _FakeAgentLoop)
@@ -2875,7 +2939,7 @@ def test_gateway_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: 
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
         cron_service=_StopCron,
     )
@@ -3227,7 +3291,7 @@ def test_gateway_local_trigger_queue_submits_agent_turns(
     config.agents.defaults.workspace = str(tmp_path / "config-workspace")
     config.agents.defaults.dream.enabled = False
     config.gateway.heartbeat.enabled = False
-    bus = MagicMock()
+    bus = MessageBus()
     seen: dict[str, object] = {}
 
     _patch_cli_command_runtime(
@@ -3381,7 +3445,7 @@ def test_gateway_workspace_override_does_not_migrate_legacy_cron(
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
         cron_service=_StopCron,
         get_cron_dir=lambda: legacy_dir,
@@ -3420,7 +3484,7 @@ def test_gateway_custom_config_workspace_does_not_migrate_legacy_cron(
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
         cron_service=_StopCron,
         get_cron_dir=lambda: legacy_dir,
@@ -3621,7 +3685,7 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
     )
     monkeypatch.setattr("nanobot.cli.gateway_runtime.AgentLoop", _FakeAgentLoop)
@@ -3832,7 +3896,7 @@ def test_gateway_agent_task_owns_initial_mcp_provider_close(
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
     )
     monkeypatch.setattr("nanobot.cli.gateway_runtime.AgentLoop", _FakeAgentLoop)
@@ -3961,7 +4025,7 @@ def test_gateway_shutdown_event_exits_forever_runtime_tasks(
     _patch_cli_command_runtime(
         monkeypatch,
         config,
-        message_bus=lambda: object(),
+        message_bus=MessageBus,
         session_manager=lambda _workspace: _EmptyGatewaySessionManager(),
     )
     monkeypatch.setattr("nanobot.cli.gateway_runtime.AgentLoop", _FakeAgentLoop)
