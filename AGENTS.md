@@ -241,7 +241,7 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 |------|-------------|-----|
 | `channels/discord.py` | `@field_validator` to coerce int IDs to strings in `allow_from`; bot-source @ mention requirement in `_handle_discord_message` (orthogonal to upstream's user-side `group_policy="mention"`); extracted `_message_mentions_current_bot` helper | Other-bot messages must @ mention us to be heard; tolerate JSON-numeric Discord IDs |
 | `channels/email.py` | SMTP port-vs-encryption auto-correction (587 → STARTTLS, 465 → implicit SSL) with warning logs | Common misconfiguration — silently broken otherwise |
-| `agent/tools/web.py` | `WebSearchTool.exclusive = True` + `_dispatch_search` 30s timeout wrap; `WebToolsConfig.enable` `AliasChoices("enable", "enabled")` | Avoid web-search provider concurrency stalls; back-compat with older `enabled:` configs |
+| `agent/tools/web.py` | `execute()` wraps upstream's provider dispatch in a `_do_search` coroutine under `asyncio.wait_for` (config timeout, default 30s); `WebToolsConfig.enable` `AliasChoices("enable", "enabled")` | A hung search provider can't stall the agent turn; back-compat with older `enabled:` configs |
 
 ### Operational defaults & infra
 
@@ -251,7 +251,7 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 | `cli/onboard.py` | `importlib.import_module(channel_cls.__module__)` instead of hardcoded `nanobot.channels.{name}` | Required to resolve channel configs for **plugin** channels (live in `nanobot_channel_*` packages) |
 | `pyproject.toml` | `fastapi`, `uvicorn`, `python-multipart` deps | Plugin channels (`nanobot-channel-{openaiapi,mcpserver}`) require them |
 | `Dockerfile` / `docker-compose.yml` | node webui-builder stage + `COPY --from=webui-builder ... nanobot/web/dist/`; openaiapi/mcpserver plugin install + ports 18791/18793/8765; `NANOBOT_SKIP_WEBUI_BUILD=1` on pip installs (dist pre-built by the node stage) | Serve upstream's gateway WebUI on 8765; run the two remaining plugin channels |
-| `skills/memory/SKILL.md` | "When to Update MEMORY.md" + "Auto-consolidation" sections | Stronger guidance against `write_file`-ing MEMORY.md (which would destroy existing memory) |
+| `skills/memory/SKILL.md` | "When to Update MEMORY.md" + "Auto-consolidation" sections appended to upstream's (v0.3.5: history-search-only) skill body | Stronger guidance against `write_file`-ing MEMORY.md (which would destroy existing memory); upstream still points the agent at `memory/MEMORY.md` as long-term memory |
 
 ### Absorbed upstream (no longer local)
 
@@ -261,8 +261,13 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 - **`_mcp_owner` task + `_mcp_shutdown_event`** — dropped after upstream's `edf78e70` added `_OwnedMCPConnection` + a per-server `mcp:{name}` owner task inside `connect_single_server`. Our single loop-level owner task existed to keep anyio cancel scopes off `run()`; upstream now does the same thing per-connection (each task opens its stack, waits on `close_requested`, closes in its own `finally`), which is strictly finer-grained — one failing server can't disturb the others, and reconnect/hot-reload close independently. `run()` now just `await self._connect_mcp()` and `close_mcp()` just delegates to `agent_context.close_mcp`. `_start_oauth_refresh_task` / `_oauth_refresh_loop` remain local.
 - **`default_text_provider` / `default_text_model` force-routing** — removed as unnecessary divergence (not upstream-absorbed; just never earned its keep). It forced all text traffic through one aggregator regardless of preset routing, but the config fields were unset in practice and custom providers (`cerebrasPersonal/Paid`) already route natively through upstream's `convert_extra_providers`. Dropped the forced-provider branch + extracted `api_base` resolver from `factory.py` (`config.get_api_base` already does the `p.api_base → spec.default_api_base` fallback), the `default_text_provider` cache-key line from `provider_signature`, and the `defaults.default_text_model or resolved.model` override from `loop.py`'s `from_config`. Per-subagent provider/model override + `strip_history_reasoning_content` stay local.
 - **`default_vision_provider` / `default_vision_model`** — removed as dead config: declared on `AgentDefaults` and set in config, but consumed nowhere in code.
+- **Blanket `WebSearchTool.exclusive = True`** — superseded by upstream making `exclusive` True only for the DuckDuckGo provider (ddgs is not concurrency-safe — the real source of the stalls we guarded against). Our timeout wrap stays local.
 - **Subagent `_format_partial_progress` (fork)** — dropped after upstream's #8332c604 ("let subagents recover from tool errors") removed the `tool_error` terminal stop_reason. Our helper only ran on that stop_reason to format partial progress on a tool-error termination; upstream now makes subagents recover and continue instead, so the branch (and its caller) are gone. The per-subagent spawn knobs (provider/model/system_prompt/tools/skills override) were re-threaded through upstream's split `_run_subagent` → `_run_admitted_subagent`. (Also note: upstream removed the `failOnToolError` config field in the same series; the user's config value is now ignored, not an error.)
 - **Fork `nanobot-channel-webui` plugin** — retired in favour of upstream's gateway-served WebUI (React SPA served by the websocket channel from `nanobot/web/dist/`). Deleted the in-tree shim (`nanobot/channels/webui/`), the plugin package (`plugins/nanobot-channel-webui/`), and `tests/test_webui_security.py`; dropped it from `EXPECTED_CHANNELS`. Dockerfile re-adds upstream's node webui-builder stage + `COPY` of the dist; `docker-compose`/`EXPOSE` drop port 18792. Config switches from `channels.webui` (username/password on 18792) to `channels.websocket` (enabled, `0.0.0.0:8765`, `tokenIssueSecret`; loopback auto-trusted, LAN/Tailscale needs the secret via `#/?bootstrapSecret=…`). The upstream WebUI is off by default (`websocket.enabled=false`); this deployment opts in.
+
+## CLAUDE.md
+
+Upstream deleted its `CLAUDE.md` in v0.3.5 (`2cfbe81a`). Ours is fork-specific (`@AGENTS.md` + the git-ignored `todo.md` pointer), so on modify/delete conflicts **keep ours** (`git add CLAUDE.md`).
 
 ## Local testing
 

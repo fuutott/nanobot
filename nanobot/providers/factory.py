@@ -297,6 +297,10 @@ def make_provider(
             fallback_presets=fallback_presets,
             provider_factory=lambda fb: _make_provider_core(config, preset=fb),
             primary_context_window_tokens=resolved.context_window_tokens,
+            fallback_preset_names=[
+                fallback if isinstance(fallback, str) else None
+                for fallback in config.agents.defaults.fallback_models
+            ],
         )
 
     return provider
@@ -373,6 +377,10 @@ def provider_signature(
         getattr(p, "proxy", None) if p else None,
         p.thinking_style if p else None,
         getattr(p, "strip_history_reasoning_content", False) if p else False,
+        tuple(
+            fallback if isinstance(fallback, str) else None
+            for fallback in config.agents.defaults.fallback_models
+        ),
         tuple(_fallback_signature(fallback) for fallback in fallback_presets),
     )
 

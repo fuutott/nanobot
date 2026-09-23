@@ -11,10 +11,16 @@ import {
   MockTreeSitterClient,
   TestRecorder,
   createTestRenderer,
+  setRendererCapabilities,
   type TestRendererSetup,
 } from "@opentui/core/testing"
 
-import { NanobotTui, sessionExitMessage, type AppOptions } from "./app"
+import {
+  NanobotTui,
+  sessionExitMessage,
+  terminalModelFailureLine,
+  type AppOptions,
+} from "./app"
 import type {
   MessageOptions,
   RecoveryState,
@@ -60,6 +66,16 @@ test("formats a reusable session ID after exit", () => {
   )
 })
 
+test("formats actionable terminal model failures without inventing retries", () => {
+  expect(terminalModelFailureLine("billing")).toBe(
+    "Model provider quota is unavailable. "
+      + "Add credit or check billing for the provider account, then try again.",
+  )
+  expect(terminalModelFailureLine("unknown")).toBe(
+    "Model provider request failed. "
+      + "Check the provider configuration or service status, then try again.",
+  )
+})
 function contrastRatio(foreground: string, background: string): number {
   const luminance = (color: string) => {
     const channel = (offset: number) => {
@@ -2050,6 +2066,42 @@ describe("NanobotTui layout", () => {
     }
   })
 
+  test("keeps finalized streamed Markdown link labels clickable", async () => {
+    setup = await createRenderer({ width: 100, height: 24, screenMode: "alternate-screen" })
+    setRendererCapabilities(setup.renderer, { hyperlinks: true })
+    const label = "HKUDS/nanobot#1234"
+    const url = "https://github.com/HKUDS/nanobot/pull/1234"
+    const content = `PR updated: [${label}](${url})`
+    const labelStart = content.indexOf(label)
+    const urlStart = content.indexOf(url)
+    const treeSitterClient = new MockTreeSitterClient({ autoResolveTimeout: 0 })
+    treeSitterClient.setMockResult({
+      highlights: [
+        [labelStart - 1, labelStart, "markup.link"],
+        [labelStart, labelStart + label.length, "markup.link.label"],
+        [labelStart + label.length, urlStart, "markup.link"],
+        [urlStart, urlStart + url.length, "markup.link.url"],
+        [urlStart + url.length, content.length, "markup.link"],
+      ],
+    })
+    const app = NanobotTui.mount(setup.renderer, options, client(), treeSitterClient)
+
+    app.accept({ event: "attached", chat_id: "chat" })
+    app.accept({ event: "delta", chat_id: "chat", text: content })
+    app.accept({ event: "stream_end", chat_id: "chat" })
+    app.accept({ event: "turn_end", chat_id: "chat" })
+    await setup.flush()
+
+    const lines = setup.captureCharFrame().split("\n")
+    const y = lines.findIndex((line) => line.includes(label))
+    const x = y >= 0 ? lines[y]!.indexOf(label) : -1
+    expect([x, y]).not.toContain(-1)
+
+    for (let offset = 0; offset < label.length; offset += 1) {
+      expect(setup.renderer.getLinkAt(x + offset, y)).toBe(url)
+    }
+  })
+
   test("keeps streamed fenced code visible while completing the response", async () => {
     setup = await createRenderer({ width: 100, height: 30, screenMode: "alternate-screen" })
     const app = mount(setup)
@@ -2600,6 +2652,77 @@ describe("NanobotTui layout", () => {
     app.accept({ event: "turn_end", chat_id: "chat" })
     await setup.flush()
     expect(ui.composer.placeholder).toBe("Ask nanobot anything")
+  })
+
+  test("updates retry state in place and ends failed turns explicitly", async () => {
+    setup = await createRenderer({ width: 96, height: 24, screenMode: "alternate-screen" })
+    const app = mount(setup)
+    app.accept({ event: "attached", chat_id: "chat" })
+    app.accept({
+      event: "goal_status",
+      chat_id: "chat",
+      status: "running",
+      turn_id: "turn-1",
+    })
+    const ui = app as unknown as { status: { plainText: string } }
+
+    app.accept({
+      event: "retry_status",
+      chat_id: "chat",
+      turn_id: "turn-1",
+      state: "waiting",
+      attempt: 1,
+      max_attempts: 4,
+      error_kind: "connection",
+      retry_after_s: 5,
+    })
+    expect(ui.status.plainText).toMatch(
+      /^Could not connect to the model provider · retrying in [45]s · attempt 1\/4/u,
+    )
+
+    app.accept({
+      event: "retry_status",
+      chat_id: "chat",
+      turn_id: "turn-1",
+      state: "waiting",
+      attempt: 2,
+      max_attempts: 4,
+      error_kind: "connection",
+      retry_after_s: 3,
+    })
+    expect(ui.status.plainText).toContain("attempt 2/4")
+
+    app.accept({
+      event: "retry_status",
+      chat_id: "chat",
+      turn_id: "turn-1",
+      state: "cleared",
+      attempt: 2,
+      max_attempts: 4,
+      error_kind: "connection",
+    })
+    expect(ui.status.plainText).not.toContain("retrying")
+
+    app.accept({
+      event: "turn_end",
+      chat_id: "chat",
+      turn_id: "turn-1",
+      outcome: "failed",
+      failure_kind: "model",
+      failure_error_kind: "connection",
+      failure_attempts: 4,
+      failure_message: "Unlocalized server failure",
+    })
+    await setup.renderOnce()
+    const frame = setup.captureCharFrame()
+    const terminalFailure = "Could not connect to the model provider. The request still failed "
+      + "on attempt 4, so retries stopped. Check the provider configuration or service status, "
+      + "then try again."
+    expect(frame).toContain("Could not connect to the model provider.")
+    expect(frame.replace(/\s+/gu, " ")).toContain(terminalFailure)
+    expect(frame).not.toContain("Unlocalized server failure")
+    expect(frame).not.toContain("Last turn failed")
+    expect(ui.status.plainText).toBe("Ready")
   })
 
   test("folds long tool traces without discarding their details", async () => {

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent.session_helpers import run_session
 from nanobot.bus.outbound_events import StreamDeltaEvent, StreamEndEvent
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import GenerationSettings
@@ -271,7 +272,7 @@ class TestDispatch:
         loop._process_message = AsyncMock(
             return_value=OutboundMessage(channel="test", chat_id="c1", content="hi")
         )
-        await loop._dispatch(msg)
+        await run_session(loop, msg)
         out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
         assert out.content == "hi"
 
@@ -300,7 +301,7 @@ class TestDispatch:
 
         loop._process_message = fake_process
 
-        await loop._dispatch(msg)
+        await run_session(loop, msg)
         first = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
         second = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
 
@@ -332,9 +333,9 @@ class TestDispatch:
         msg1 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="a")
         msg2 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="b")
 
-        t1 = asyncio.create_task(loop._dispatch(msg1))
+        t1 = asyncio.create_task(run_session(loop, msg1))
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
-        t2 = asyncio.create_task(loop._dispatch(msg2))
+        t2 = asyncio.create_task(run_session(loop, msg2))
         await asyncio.sleep(0)
         assert order == ["start-a"]
 
@@ -422,7 +423,7 @@ class TestSubagentCancellation:
 
         call_count = {"n": 0}
 
-        async def scripted_chat_with_retry(*, messages, **kwargs):
+        async def scripted_chat_stream_with_retry(*, messages, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return LLMResponse(
@@ -433,11 +434,12 @@ class TestSubagentCancellation:
                 )
             captured_second_call[:] = messages
             return LLMResponse(content="done", tool_calls=[])
-        provider.chat_with_retry = scripted_chat_with_retry
+        provider.chat_stream_with_retry = scripted_chat_stream_with_retry
         mgr = SubagentManager(
             workspace=tmp_path,
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+            consolidator=MagicMock(),
         )
 
         async def fake_execute(self, **kwargs):
@@ -518,7 +520,7 @@ class TestSubagentCancellation:
         bus = MessageBus()
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
-        provider.chat_with_retry = AsyncMock(side_effect=[
+        provider.chat_stream_with_retry = AsyncMock(side_effect=[
             LLMResponse(
                 content="first attempt",
                 tool_calls=[
@@ -537,6 +539,7 @@ class TestSubagentCancellation:
             workspace=tmp_path,
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+            consolidator=MagicMock(),
         )
         mgr._announce_result = AsyncMock()
 
@@ -566,7 +569,7 @@ class TestSubagentCancellation:
         assert args[3] == "recovered after tool failure"
         assert args[5] == "ok"
         assert calls["n"] == 2
-        assert provider.chat_with_retry.await_count == 3
+        assert provider.chat_stream_with_retry.await_count == 3
 
     @pytest.mark.asyncio
     async def test_cancel_by_session_cancels_running_subagent_tool(self, monkeypatch, tmp_path):
@@ -577,7 +580,7 @@ class TestSubagentCancellation:
         bus = MessageBus()
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
-        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+        provider.chat_stream_with_retry = AsyncMock(return_value=LLMResponse(
             content="thinking",
             tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={"path": "."})],
         ))
@@ -585,6 +588,7 @@ class TestSubagentCancellation:
             workspace=tmp_path,
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+            consolidator=MagicMock(),
         )
         mgr._announce_result = AsyncMock()
 
