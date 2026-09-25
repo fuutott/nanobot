@@ -239,7 +239,7 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 
 | Area | What we keep | Why |
 |------|-------------|-----|
-| `channels/discord.py` | `@field_validator` to coerce int IDs to strings in `allow_from`; bot-source @ mention requirement in `_handle_discord_message` (orthogonal to upstream's user-side `group_policy="mention"`); extracted `_message_mentions_current_bot` helper | Other-bot messages must @ mention us to be heard; tolerate JSON-numeric Discord IDs |
+| `channels/discord.py` | `@field_validator` to coerce int IDs to strings in `allow_from`; bot-source @ mention requirement in upstream's `_process_discord_message`, right after its self-loop guard (#3217) — upstream accepts *all* other bots; we require them to @-mention us (orthogonal to upstream's user-side `group_policy="mention"`); extracted `_message_mentions_current_bot` helper | Other-bot messages must @ mention us to be heard; tolerate JSON-numeric Discord IDs |
 | `channels/email.py` | SMTP port-vs-encryption auto-correction (587 → STARTTLS, 465 → implicit SSL) with warning logs | Common misconfiguration — silently broken otherwise |
 | `agent/tools/web.py` | `execute()` wraps upstream's provider dispatch in a `_do_search` coroutine under `asyncio.wait_for` (config timeout, default 30s); `WebToolsConfig.enable` `AliasChoices("enable", "enabled")` | A hung search provider can't stall the agent turn; back-compat with older `enabled:` configs |
 

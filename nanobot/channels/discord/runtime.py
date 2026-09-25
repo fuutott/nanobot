@@ -104,6 +104,8 @@ if DISCORD_AVAILABLE:
                 self._channel.logger.warning("app command sync failed: {}", e)
 
         async def on_message(self, message: discord.Message) -> None:
+            if self._channel._client is not self or not self._channel.is_running:
+                return
             await self._channel._handle_discord_message(message)
 
         async def on_thread_delete(self, thread: discord.Thread) -> None:
@@ -454,7 +456,8 @@ class DiscordChannel(BaseChannel):
         self._bot_user_id: str | None = None
         self._pending_reactions: dict[str, Any] = {}  # chat_id -> message object
         self._compaction_notices: dict[tuple[str, str], discord.Message] = {}
-        self._working_emoji_tasks: dict[str, asyncio.Task[None]] = {}
+        self._working_emoji_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._inbound_tasks: set[asyncio.Task[Any]] = set()
         self._stream_bufs: dict[str, _StreamBuf] = {}
         self._known_channels: dict[str, Any] = {}
 
@@ -633,7 +636,26 @@ class DiscordChannel(BaseChannel):
             raise
 
     async def _handle_discord_message(self, message: discord.Message) -> None:
-        """Handle incoming Discord messages from discord.py."""
+        """Own in-flight callbacks until they finish or runtime reset drains them."""
+        task = asyncio.current_task()
+        if task is not None:
+            self._inbound_tasks.add(task)
+        try:
+            await self._process_discord_message(message)
+        finally:
+            if task is not None:
+                self._inbound_tasks.discard(task)
+
+    async def _process_discord_message(self, message: discord.Message) -> None:
+        """Handle incoming Discord messages from discord.py.
+
+        Self-loop guard: always drop messages from this bot's own account (#3217).
+        Fork: other bots are only heard when they explicitly @-mention us (see the
+        bot-author gate below) — stricter than upstream, which accepts all other
+        bots, so bot chatter in shared channels can't trigger turns.
+        """
+        if self._bot_user_id is not None and str(message.author.id) == self._bot_user_id:
+            return
         if self._is_system_message(message):
             return
 
@@ -643,11 +665,9 @@ class DiscordChannel(BaseChannel):
         self._remember_channel(message.channel)
         content = message.content or ""
 
-        if message.author.bot:
-            if sender_id == self._bot_user_id:
-                return
-            if not self._message_mentions_current_bot(message, content):
-                return
+        # Fork: other bots must explicitly @-mention us (self-messages dropped above).
+        if message.author.bot and not self._message_mentions_current_bot(message, content):
+            return
 
         if not self._should_accept_inbound(message, sender_id, content):
             return
@@ -678,7 +698,17 @@ class DiscordChannel(BaseChannel):
             with suppress(Exception):
                 await message.add_reaction(self.config.working_emoji)
 
-        self._working_emoji_tasks[channel_id] = asyncio.create_task(_delayed_working_emoji())
+        task = asyncio.create_task(_delayed_working_emoji())
+        self._working_emoji_tasks.setdefault(channel_id, set()).add(task)
+
+        def reaction_done(done: asyncio.Task[None]) -> None:
+            tasks = self._working_emoji_tasks.get(channel_id)
+            if tasks is not None:
+                tasks.discard(done)
+                if not tasks:
+                    self._working_emoji_tasks.pop(channel_id, None)
+
+        task.add_done_callback(reaction_done)
 
         try:
             await self._handle_message(
@@ -898,15 +928,18 @@ class DiscordChannel(BaseChannel):
 
     async def _clear_reactions(self, chat_id: str) -> None:
         """Remove all pending reactions after bot replies."""
-        # Cancel delayed working emoji if it hasn't fired yet
-        task = self._working_emoji_tasks.pop(chat_id, None)
-        if task and not task.done():
-            task.cancel()
-
+        # Keep tasks owned until done, so a concurrent reset can drain them too.
+        tasks = tuple(self._working_emoji_tasks.get(chat_id, ()))
+        # Snapshot before yielding; a newer receipt must survive this cleanup.
         msg_obj = self._pending_reactions.pop(chat_id, None)
+        bot_user = self._client.user if self._client else None
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
         if msg_obj is None:
             return
-        bot_user = self._client.user if self._client else None
         for emoji in (self.config.read_receipt_emoji, self.config.working_emoji):
             with suppress(Exception):
                 await msg_obj.remove_reaction(emoji, bot_user)
@@ -917,9 +950,28 @@ class DiscordChannel(BaseChannel):
         for channel_id in channel_ids:
             await self._stop_typing(channel_id)
 
+    async def _cancel_all_reactions(self) -> None:
+        """Stop delayed reactions and release their retained messages."""
+        tasks = tuple(task for group in self._working_emoji_tasks.values() for task in group)
+        self._pending_reactions.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._working_emoji_tasks.clear()
+
     async def _reset_runtime_state(self, close_client: bool) -> None:
-        """Reset client and typing state."""
+        """Reset client and transient runtime state."""
+        self._running = False
+        # Drain callbacks before clearing the state they can still create after an await.
+        current = asyncio.current_task()
+        inbound = tuple(task for task in self._inbound_tasks if task is not current)
+        for task in inbound:
+            task.cancel()
+        if inbound:
+            await asyncio.gather(*inbound, return_exceptions=True)
         await self._cancel_all_typing()
+        await self._cancel_all_reactions()
         self._compaction_notices.clear()
         self._stream_bufs.clear()
         self._known_channels.clear()
