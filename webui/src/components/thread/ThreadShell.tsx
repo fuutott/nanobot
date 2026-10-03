@@ -683,6 +683,7 @@ export function ThreadShell({
     loading,
     error: historyError,
     loadingOlder,
+    olderError,
     loadOlder,
     hasMoreBefore,
     userMessageOffset,
@@ -1130,6 +1131,7 @@ export function ThreadShell({
 
   useEffect(() => {
     if (!historyKey || !chatId || loading) return;
+    client.fenceCanonicalCompletedTurns(chatId, completedTurnIds);
     const cached = messageCacheRef.current.get(chatId);
     const pendingCanonicalHydrate = pendingCanonicalHydrateRef.current.get(chatId);
     const hasNewCanonicalHistory = (
@@ -1922,6 +1924,7 @@ export function ThreadShell({
             forkBoundaryMessageCount={forkBoundaryMessageCount}
             hasMoreBefore={hasMoreBefore}
             loadingOlder={loadingOlder}
+            olderError={olderError}
             userMessageOffset={userMessageOffset}
             onLoadOlder={loadOlder}
             traceDetailScope={historyKey}

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nanobot.agent.memory import Consolidator
 from nanobot.agent.runner import AgentRunResult
 from nanobot.agent.subagent import SubagentManager, SubagentStatus
 from nanobot.agent.tools.filesystem import FileToolsConfig
@@ -31,6 +32,7 @@ async def test_subagent_uses_tool_loader():
         workspace=Path("/tmp"),
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
     tools = sm._build_tools()
     assert tools.has("read_file")
@@ -49,6 +51,7 @@ async def test_subagent_build_tools_isolates_file_read_state(tmp_path):
         workspace=tmp_path,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
 
     first_read = sm._build_tools().get("read_file")
@@ -72,6 +75,7 @@ async def test_spawn_rejects_provider_override_without_factory():
         bus=MessageBus(),
         model="test",
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
 
     result = await sm.spawn(task="do thing", provider="openrouter")
@@ -97,6 +101,7 @@ async def test_spawn_rejects_unknown_provider():
         bus=MessageBus(),
         model="test",
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
         provider_factory=factory,
         available_providers=["anthropic", "openrouter"],
     )
@@ -126,6 +131,7 @@ async def test_spawn_with_inherited_provider_does_not_invoke_factory(monkeypatch
         bus=MessageBus(),
         model="test",
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
         provider_factory=factory,
         available_providers=["anthropic"],
     )
@@ -148,6 +154,7 @@ def test_subagent_respects_file_tool_toggle(tmp_path):
         workspace=tmp_path,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
         tools_config=ToolsConfig(file=FileToolsConfig(enable=False)),
     )
 
@@ -178,6 +185,7 @@ def test_subagent_prompt_keeps_agent_paths_for_selected_project(tmp_path):
         workspace=agent_workspace,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
 
     prompt = manager._build_subagent_prompt(workspace=project)
@@ -199,6 +207,7 @@ def test_subagent_prompt_uses_relative_paths_in_agent_workspace(tmp_path):
         workspace=tmp_path,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
 
     prompt = manager._build_subagent_prompt()
@@ -220,6 +229,7 @@ async def test_subagent_keeps_project_runtime_scope_with_agent_owned_tools(tmp_p
         workspace=agent_workspace,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
     manager.runner.run = AsyncMock(
         return_value=AgentRunResult(final_content="ok", messages=[], stop_reason="completed")
@@ -350,6 +360,7 @@ async def test_spawned_subagent_inherits_llm_usage_source(tmp_path):
         workspace=tmp_path,
         bus=MessageBus(),
         max_tool_result_chars=16_000,
+        consolidator=MagicMock(spec=Consolidator),
     )
     sm.runner.run = AsyncMock(
         return_value=AgentRunResult(final_content="ok", messages=[], stop_reason="completed")

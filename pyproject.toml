@@ -30,6 +30,8 @@ dependencies = [
     # Feishu's lark-oapi currently requires websockets<16; core supports 15 and 16.
     "websockets>=15.0,<17.0",
     "httpx[socks]>=0.28.0,<1.0.0",
+    "aiohttp>=3.14.3,<4.0.0",
+    "cryptography>=46.0.0",
     # Fork: plugin channels (nanobot-channel-{openaiapi,mcpserver}) need these.
     "fastapi>=0.135.0,<1.0.0",
     "uvicorn>=0.42.0,<1.0.0",
