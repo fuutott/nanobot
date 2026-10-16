@@ -635,7 +635,7 @@ async def test_execute_contains_malformed_success_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registry_adds_retry_hint_to_malformed_mcp_result() -> None:
+async def test_registry_adds_error_hint_to_malformed_mcp_result() -> None:
     async def call_tool(_name: str, arguments: dict) -> object:
         return SimpleNamespace(content=None)
 
@@ -647,7 +647,10 @@ async def test_registry_adds_retry_hint_to_malformed_mcp_result() -> None:
 
     assert is_tool_error_result(result)
     assert "MCP tool returned malformed content" in result
-    assert "Analyze the error above and try a different approach" in result
+    assert (
+        "[Consider this result in the context of the user's goal "
+        "and decide whether and how to proceed.]"
+    ) in result
 
 
 @pytest.mark.asyncio
@@ -1493,9 +1496,18 @@ async def test_connect_mcp_servers_rolls_back_completed_batch_on_cancellation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_timeout", "expected_read"),
+    [
+        (30, 300.0),  # default: match the MCP SDK's SSE read timeout
+        (600, 600.0),  # long-running tools: read must not cut the call short
+    ],
+)
 async def test_connect_mcp_servers_streamable_http_uses_finite_timeout(
     fake_mcp_runtime: dict[str, object | None],
     monkeypatch: pytest.MonkeyPatch,
+    tool_timeout: int,
+    expected_read: float,
 ) -> None:
     fake_mcp_runtime["session"] = _make_fake_session(["demo"])
     captured: dict[str, object] = {}
@@ -1526,7 +1538,11 @@ async def test_connect_mcp_servers_streamable_http_uses_finite_timeout(
 
     registry = ToolRegistry()
     stacks = await connect_mcp_servers(
-        {"test": MCPServerConfig(url="https://mcp.example.com/mcp")},
+        {
+            "test": MCPServerConfig(
+                url="https://mcp.example.com/mcp", tool_timeout=tool_timeout
+            )
+        },
         registry,
     )
     for stack in stacks.values():
@@ -1534,7 +1550,7 @@ async def test_connect_mcp_servers_streamable_http_uses_finite_timeout(
 
     timeout = captured["timeout"]
     assert timeout.connect == 10.0
-    assert timeout.read == 30.0
+    assert timeout.read == expected_read
     assert timeout.write == 30.0
     assert timeout.pool == 30.0
 

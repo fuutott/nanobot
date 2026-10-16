@@ -324,6 +324,7 @@ describe("NanobotClient", () => {
     lastSocket().sent = [];
     client.onChat(chatId, vi.fn());
     client.sendMessage(chatId, "hello", undefined, { turnId: "turn-1" });
+    expect(client.getUnsettledRunChatIds()).toEqual([]);
 
     expect(lastSocket().sent.map((raw) => JSON.parse(raw))).toEqual([
       {
@@ -581,10 +582,11 @@ describe("NanobotClient", () => {
 
     expect(client.getRunStartedAt("chat-stop")).toBeNull();
     expect(client.hasUnsettledRun("chat-stop")).toBe(false);
+    expect(client.isRunCompleted("chat-stop", "turn-stop")).toBe(true);
     expect(handler).toHaveBeenLastCalledWith("chat-stop", null);
   });
 
-  it("clears stale run strip when reconnecting after a dropped socket", async () => {
+  it("preserves durable run clocks and identities through transport reconnect", async () => {
     const client = new NanobotClient({
       url: "ws://test",
       reconnect: true,
@@ -598,16 +600,33 @@ describe("NanobotClient", () => {
     lastSocket().fakeMessage({
       event: "goal_status",
       chat_id: "chat-strip",
+      turn_id: "turn-strip",
       status: "running",
       started_at: 12_345,
     });
 
     lastSocket().close();
 
-    expect(client.getRunStartedAt("chat-strip")).toBeNull();
-    expect(handler).toHaveBeenLastCalledWith("chat-strip", null);
+    expect(client.status).toBe("reconnecting");
+    expect(client.getRunStartedAt("chat-strip")).toBe(12_345);
+    expect(client.getRunTurnId("chat-strip")).toBe("turn-strip");
+    expect(client.isRunCompleted("chat-strip", "turn-strip")).toBe(false);
+    expect(client.getUnsettledRunChatIds()).toEqual(["chat-strip"]);
+    expect(handler).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(20);
     expect(FakeSocket.instances.length).toBeGreaterThan(1);
+    lastSocket().fakeOpen();
+    expect(client.getRunStartedAt("chat-strip")).toBe(12_345);
+    expect(handler).toHaveBeenCalledTimes(1);
+    lastSocket().fakeMessage({
+      event: "turn_end", chat_id: "chat-strip", turn_id: "turn-strip",
+    });
+    expect(client.getRunStartedAt("chat-strip")).toBeNull();
+    expect(client.getUnsettledRunChatIds()).toEqual([]);
+    expect(client.isRunCompleted("chat-strip", "turn-strip")).toBe(true);
+    expect(client.isRunCompleted("another-chat", "turn-strip")).toBe(false);
+    expect(handler).toHaveBeenLastCalledWith("chat-strip", null);
+    client.close();
   });
 
   it("clears run strip when a turn_end arrives without idle", () => {
@@ -702,6 +721,12 @@ describe("NanobotClient", () => {
         "chat-guidance",
         requestGeneration,
         ["turn-active"],
+        {
+          observedTurnIds: ["turn-active", "turn-guidance"],
+          hasPendingToolCalls: false,
+          activeTurnId: null,
+          completionIdsProvided: true,
+        },
       ),
     ).toBe(true);
   });
@@ -1086,6 +1111,38 @@ describe("NanobotClient", () => {
     expect(client.hasUnsettledRun("chat-ack-lost")).toBe(false);
   });
 
+  it("requires a supplied completion identity before closing an observed lifecycle turn", () => {
+    const client = new NanobotClient({
+      url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    const received = vi.fn();
+    client.onChat("chat-authority", received);
+    client.connect();
+    lastSocket().fakeOpen();
+    client.sendMessage("chat-authority", "question", undefined, { turnId: "turn-authority" });
+    const requestGeneration = client.getRunGeneration("chat-authority");
+    lastSocket().fakeMessage({
+      event: "goal_status", chat_id: "chat-authority", turn_id: "turn-authority",
+      status: "running", started_at: 123,
+    });
+    const snapshot = {
+      observedTurnIds: ["turn-authority"], hasPendingToolCalls: false,
+      activeTurnId: null, completionIdsProvided: true,
+    };
+    expect(client.canReconcileCanonicalCompletion("chat-authority", requestGeneration, [], snapshot)).toBe(false);
+    expect(client.reconcileCanonicalCompletion("chat-authority", requestGeneration, [], snapshot)).toBe(false);
+    expect(client.getRunStartedAt("chat-authority")).toBe(123);
+    expect(client.hasUnsettledRun("chat-authority")).toBe(true);
+    received.mockClear();
+    lastSocket().fakeMessage({ event: "delta", chat_id: "chat-authority", turn_id: "turn-authority", text: "Still running" });
+    expect(received).toHaveBeenCalledWith(expect.objectContaining({ event: "delta", text: "Still running" }));
+    expect(client.reconcileCanonicalCompletion(
+      "chat-authority", requestGeneration, ["turn-authority"], snapshot,
+    )).toBe(true);
+    expect(client.hasUnsettledRun("chat-authority")).toBe(false);
+  });
+
   it("settles an accepted turn that never reached running from canonical idle", () => {
     const client = new NanobotClient({
       url: "ws://test",
@@ -1328,8 +1385,6 @@ describe("NanobotClient", () => {
       workbench: { version: 1, tabs: {} },
       view: {
         density: "comfortable",
-        show_previews: false,
-        show_timestamps: false,
         show_archived: false,
         sort: "manual",
       },
@@ -1392,8 +1447,6 @@ describe("NanobotClient", () => {
       },
       view: {
         density: "comfortable",
-        show_previews: false,
-        show_timestamps: false,
         show_archived: false,
         sort: "updated_desc",
       },
@@ -1456,6 +1509,60 @@ describe("NanobotClient", () => {
     });
 
     await expect(pending).rejects.toThrow("message_rejected:invalid_command");
+  });
+
+  it.each(["progress", "tool_hint", "reasoning"] as const)(
+    "delivers a delayed %s message after completion without reopening the turn",
+    (kind) => {
+      const client = new NanobotClient({
+        url: "ws://test", reconnect: false,
+        socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+      });
+      const handler = vi.fn();
+      client.onChat("chat-late", handler);
+      client.connect();
+      const socket = lastSocket();
+      socket.fakeOpen();
+      socket.fakeMessage({
+        event: "goal_status", chat_id: "chat-late", turn_id: "turn-late",
+        status: "running", started_at: 123,
+      });
+      expect(client.getRunStartedAt("chat-late")).toBe(123);
+      socket.fakeMessage({ event: "turn_end", chat_id: "chat-late", turn_id: "turn-late" });
+      const message = {
+        event: "message", chat_id: "chat-late", turn_id: "turn-late", kind, text: "Late detail",
+      };
+      socket.fakeMessage(message);
+
+      expect(handler).toHaveBeenLastCalledWith(message);
+      expect(client.isRunCompleted("chat-late", "turn-late")).toBe(true);
+      expect(client.getRunStartedAt("chat-late")).toBeNull();
+      expect(client.hasUnsettledRun("chat-late")).toBe(false);
+      client.close();
+    },
+  );
+
+  it("settles running status without a start timestamp", () => {
+    const client = new NanobotClient({
+      url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    const socket = lastSocket();
+    socket.fakeOpen();
+    client.sendMessage("chat-legacy", "task", undefined, { turnId: "turn-legacy" });
+    expect(client.hasUnsettledRun("chat-legacy")).toBe(true);
+    const completed = vi.fn();
+    client.onRunCompletion(completed);
+    socket.fakeMessage({
+      event: "goal_status", chat_id: "chat-legacy", turn_id: "turn-legacy", status: "running",
+    });
+
+    expect(completed).toHaveBeenCalledWith("chat-legacy");
+    expect(client.isRunCompleted("chat-legacy", "turn-legacy")).toBe(true);
+    expect(client.hasUnsettledRun("chat-legacy")).toBe(false);
+    expect(client.getRunTurnId("chat-legacy")).toBe("turn-legacy");
+    client.close();
   });
 
   it("ignores a delayed idle event from an older turn after a new run starts", () => {
@@ -1618,6 +1725,18 @@ describe("NanobotClient", () => {
     });
 
     expect(chatHandler).toHaveBeenCalledTimes(deliveredBeforeLateFrames);
+    expect(client.getRunStartedAt("chat-canonical")).toBeNull();
+    const otherChat = vi.fn();
+    client.onChat("other-chat", otherChat);
+    const taskUpdate = {
+      event: "subagent_task", chat_id: "chat-canonical",
+      task: { task_id: "child", origin_turn_id: "turn-canonical", state: "done", revision: 4 },
+    };
+    lastSocket().fakeMessage(taskUpdate);
+    expect(chatHandler).toHaveBeenLastCalledWith(taskUpdate);
+    expect(chatHandler).toHaveBeenCalledTimes(deliveredBeforeLateFrames + 1);
+    expect(otherChat).not.toHaveBeenCalled();
+    expect(client.hasUnsettledRun("chat-canonical")).toBe(false);
     expect(client.getRunStartedAt("chat-canonical")).toBeNull();
   });
 
@@ -2364,5 +2483,109 @@ describe("NanobotClient", () => {
     await vi.advanceTimersByTimeAsync(50);
     expect(seen).toContain("reconnecting");
     expect(FakeSocket.instances.length).toBeGreaterThan(1);
+  });
+});
+
+
+describe("binary attachment transport", () => {
+  it("keeps a progressing HTTP upload alive beyond the old 65-second limit", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), milliseconds);
+      return controller.signal;
+    });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((_url, request: RequestInit) => new Promise((resolve, reject) => {
+      request.signal?.addEventListener("abort", () => reject(new Error("Upload timed out")));
+      setTimeout(() => resolve(Response.json({ reference: "slow-ref" }, { status: 201 })), 80_000);
+    })));
+    const client = new NanobotClient({ url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket });
+    try {
+      client.connect();
+      const socket = lastSocket(); socket.fakeOpen();
+      socket.fakeMessage({ event: "ready", chat_id: "chat", client_id: "test",
+        upload: { path: "/api/attachments", token: "cap" } });
+      const delivery = client.sendAttachments("chat", "look", [
+        { data_url: "data:text/plain;base64,eA==", name: "note.txt" },
+      ], { turnId: "slow-upload" });
+      await vi.advanceTimersByTimeAsync(80_000);
+      expect(socket.sent.some((frame) => frame.includes("slow-ref"))).toBe(true);
+      socket.fakeMessage({ event: "message_accepted", chat_id: "chat", turn_id: "slow-upload" });
+      await delivery;
+    } finally {
+      client.close(); vi.unstubAllGlobals(); timeout.mockRestore();
+    }
+  });
+
+  it("rejects an oversized message envelope without waiting for an ACK and retains the draft", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ reference: "ref" }, { status: 201 })));
+    const client = new NanobotClient({ url: "ws://test", reconnect: false, maxFrameBytes: 256,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket });
+    try {
+      client.connect();
+      const socket = lastSocket(); socket.fakeOpen();
+      socket.fakeMessage({ event: "ready", chat_id: "chat", client_id: "test",
+        upload: { path: "/api/attachments", token: "cap" } });
+      const draft = [{ data_url: "data:text/plain;base64,eA==", name: "note.txt" }];
+      await expect(client.sendAttachments("chat", "x".repeat(400), draft)).rejects.toThrow("frame limit");
+      expect(socket.sent.filter((value) => JSON.parse(value).type === "message")).toHaveLength(0);
+      expect(draft[0].data_url).toBe("data:text/plain;base64,eA==");
+    } finally { client.close(); vi.unstubAllGlobals(); }
+  });
+
+  it("uploads >1 MiB as HTTP bytes and waits for a small WS reference ACK", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ reference: "opaque-ref" }, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new NanobotClient({ url: "ws://test", reconnect: false, maxFrameBytes: 1024 * 1024,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket });
+    try {
+      client.connect();
+      const socket = lastSocket();
+      socket.fakeOpen();
+      socket.fakeMessage({ event: "ready", chat_id: "chat", client_id: "test",
+        upload: { path: "/api/attachments", token: "upload-capability" } });
+      const raw = "x".repeat(1_089_490);
+      let accepted = false;
+      const delivery = client.sendAttachments("chat", "look", [
+        { data_url: `data:image/png;base64,${btoa(raw)}`, name: "paste.png" },
+      ], { turnId: "large-image" }).then(() => { accepted = true; });
+      await vi.waitFor(() => expect(socket.sent.some((frame) => frame.includes("opaque-ref"))).toBe(true));
+      expect(accepted).toBe(false);
+      const [, request] = fetchMock.mock.calls[0];
+      expect(request.method).toBe("POST");
+      expect(request.headers.Authorization).toBe("Bearer upload-capability");
+      expect(request.redirect).toBe("error");
+      expect(request.credentials).toBe("same-origin");
+      expect(await request.body.text()).toBe(raw);
+      const frame = socket.sent.find((value) => value.includes("opaque-ref"))!;
+      expect(frame.length).toBeLessThan(1024);
+      expect(frame).not.toContain("data_url");
+      socket.fakeMessage({ event: "message_accepted", chat_id: "chat", turn_id: "large-image" });
+      await delivery;
+      expect(accepted).toBe(true);
+    } finally { client.close(); vi.unstubAllGlobals(); }
+  });
+
+  it("does not send a message after HTTP rejection or a connection change", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("denied", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new NanobotClient({ url: "ws://test", reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket });
+    try {
+      client.connect();
+      const socket = lastSocket(); socket.fakeOpen();
+      socket.fakeMessage({ event: "ready", chat_id: "chat", client_id: "test",
+        upload: { path: "/api/attachments", token: "cap" } });
+      const draft = [{ data_url: "data:text/plain;base64,eA==", name: "note.txt" }];
+      await expect(client.sendAttachments("chat", "look", draft)).rejects.toThrow("401");
+      expect(socket.sent.filter((frame) => JSON.parse(frame).type === "message")).toHaveLength(0);
+      expect(draft[0].data_url).toBe("data:text/plain;base64,eA==");
+      fetchMock.mockImplementation(async () => {
+        socket.fakeCloseWithCode(1009);
+        return Response.json({ reference: "old-connection-ref" });
+      });
+      await expect(client.sendAttachments("chat", "look", draft)).rejects.toThrow("Connection changed");
+      expect(socket.sent.filter((frame) => JSON.parse(frame).type === "message")).toHaveLength(0);
+    } finally { client.close(); vi.unstubAllGlobals(); }
   });
 });

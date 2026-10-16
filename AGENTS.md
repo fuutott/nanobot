@@ -8,6 +8,7 @@ The Python gateway owns agent execution, sessions, tools, memory, and security p
 | --- | --- |
 | Core boundaries, extensions, or internal types | [`.agent/design.md`](.agent/design.md) |
 | Refactoring, fallbacks, or test selection | [`.agent/simplify.md`](.agent/simplify.md) |
+| User-facing copy, feature naming, or localization | [`.agent/copywriting.md`](.agent/copywriting.md) |
 | Path permissions, HTTP/MCP, or shell isolation | [`.agent/security.md`](.agent/security.md) |
 | Dependency setup, WebUI transport, config, Windows, prompts, or persistence | [`.agent/gotchas.md`](.agent/gotchas.md) |
 | Reusing verification evidence | [`.agent/workflow.md`](.agent/workflow.md) |
@@ -51,15 +52,15 @@ built SPA. pyproject's `include`/`artifacts` package the copied dist into the wh
 
 The plugins' own `[project.entry-points."nanobot.channels"]` declarations were removed (the group is dead; discovery is via the in-tree manifests). `tests/channels/test_channel_setup.py::EXPECTED_CHANNELS` includes the 2 fork channels (openaiapi, mcpserver).
 
-**Channel deps at build:** upstream also moved per-channel dependencies out of pyproject extras into each channel's `manifest.py` (`dependencies=`) with a runtime pip auto-installer that can't run in our non-root/offline container. The Dockerfile's `ARG NANOBOT_CHANNEL_DEPS` bakes the enabled channels' deps (discord.py, python-telegram-bot, socks) at build — **keep it in sync with the enabled channels' manifest `dependencies=`** or the channel silently fails to load.
+**Channel deps at build:** upstream also moved per-channel dependencies out of pyproject extras into each channel's `manifest.py` (`dependencies=`) with a runtime pip auto-installer that can't run in our non-root/offline container. The Dockerfile's dependency layer installs `-r pyproject.toml --extra <x>` for `ARG NANOBOT_EXTRAS=discord,telegram` (the fork's re-added extras) — **keep it in sync with the enabled channels' manifest `dependencies=`** or the channel silently fails to load. Upstream's `ARG NANOBOT_CHANNELS` manifest-installer loop is kept but defaults to empty for us.
 
 ### MCP OAuth 2.1 (`agent/tools/oauth_flow.py`, `oauth_tokens.py`, `agent/loop.py`)
 
 Talk to OAuth-protected remote MCP servers. Device-flow + dynamic client registration. `_resolve_oauth_token` injects `Authorization: Bearer …` at the top of upstream's `connect_single_server`, so it re-resolves on every reconnect (refresh-token rotation happens for free). `_oauth_refresh_loop` refreshes tokens before expiry. CLI command: `nanobot mcp-auth <server-name>`.
 
-### Per-subagent provider/model override (`agent/tools/spawn.py`)
+### Per-subagent overrides (`agent/tools/subagent.py`, `subagent(action="create")`)
 
-Agent can pass `provider=` and `model=` when calling `spawn`. Defaults inherit from main agent. Agent discovers options via `my check available_providers` / `my check available_models`.
+Upstream replaced the `spawn` tool with a `subagent` tool (`create`/`send`/`cancel`/`check`, #5985). On `create` the agent can also pass `provider` / `model` (ephemeral runtime via the provider factory), `system_prompt` (replaces the generated subagent prompt), and `tools` / `skills` whitelists. Defaults inherit from the parent. Options are discoverable via `my check available_providers` / `my check available_models`.
 
 ### Docker deployment shape
 
@@ -164,9 +165,10 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 | Area | What we keep | Why |
 |------|-------------|-----|
 | `agent/loop.py` | `from_config`: `_subagent_provider_factory` + `available_providers` / `available_models` properties | Per-subagent provider/model override discovery |
-| `agent/subagent.py` | `provider_factory` callback + per-spawn `provider` / `model` overrides + `available_providers` / `available_models` lists | Per-subagent provider/model override |
-| `agent/tools/spawn.py` | `provider` + `model` schema params | Surface the override to the agent |
-| `providers/factory.py` | `strip_history_reasoning_content` passthrough in `create_dynamic_spec` + `provider_signature` cache key | Cerebras 400-fix: strip prior-turn reasoning content from history for providers that reject it (`stripHistoryReasoningContent` per-provider config) |
+| `agent/subagent.py` | `provider_factory` + `available_providers` / `available_models`; `_override_runtime()` applied in `spawn` / `run_inline` before `_create_task`; knob fields (`system_prompt_override` / `tools_filter` / `skills_filter`) on upstream's `_SubagentTask` record, consumed in `_run_admitted_subagent` (`_build_tools(allowed_tools=…)`, `_build_subagent_prompt(skills_filter=…)`) | Per-subagent overrides composed inside upstream's record-based task lifecycle (#5985) |
+| `agent/tools/subagent.py` | `provider` / `model` / `system_prompt` / `tools` / `skills` params on `create`, forwarded to the manager | Surface the overrides to the agent |
+| `agent/tools/loader.py` | `allowed_tools` filter on `ToolLoader.load` | Tool whitelist for subagents |
+| `providers/routing.py`, `factory.py`, `registry.py`, `config/schema.py` | `stripHistoryReasoningContent` per-provider config field, passed into `create_dynamic_spec` for custom providers (routing.py) and into the `_preset_provider_signature` cache key | Cerebras 400-fix for custom providers. Upstream now has the spec-level flag natively (for Mistral) — only the config opt-in is ours |
 
 ### Channel hardening (pure additions / fixes upstream lacks)
 
@@ -196,6 +198,8 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 - **`default_vision_provider` / `default_vision_model`** — removed as dead config: declared on `AgentDefaults` and set in config, but consumed nowhere in code.
 - **Blanket `WebSearchTool.exclusive = True`** — superseded by upstream making `exclusive` True only for the DuckDuckGo provider (ddgs is not concurrency-safe — the real source of the stalls we guarded against). Our timeout wrap stays local.
 - **Subagent `_format_partial_progress` (fork)** — dropped after upstream's #8332c604 ("let subagents recover from tool errors") removed the `tool_error` terminal stop_reason. Our helper only ran on that stop_reason to format partial progress on a tool-error termination; upstream now makes subagents recover and continue instead, so the branch (and its caller) are gone. The per-subagent spawn knobs (provider/model/system_prompt/tools/skills override) were re-threaded through upstream's split `_run_subagent` → `_run_admitted_subagent`. (Also note: upstream removed the `failOnToolError` config field in the same series; the user's config value is now ignored, not an error.)
+- **`spawn` tool → upstream `subagent` tool (#5985)** — upstream deleted `agent/tools/spawn.py` and redesigned subagents as session-owned, record-based tasks. Our knobs were re-composed onto `subagent(action="create")`. Fixed a latent fork bug in the process: the old spawn schema exposed camelCase `systemPrompt`, which never reached the snake_case `system_prompt` parameter (no casing conversion exists), so the prompt override silently did nothing; it's now `system_prompt`, covered by `test_subagent_create_forwards_fork_override_knobs`.
+- **Spec-level `strip_history_reasoning_content`** — upstream added it natively (Mistral). Kept only our per-provider config opt-in for custom providers.
 - **Fork `nanobot-channel-webui` plugin** — retired in favour of upstream's gateway-served WebUI (React SPA served by the websocket channel from `nanobot/web/dist/`). Deleted the in-tree shim (`nanobot/channels/webui/`), the plugin package (`plugins/nanobot-channel-webui/`), and `tests/test_webui_security.py`; dropped it from `EXPECTED_CHANNELS`. Dockerfile re-adds upstream's node webui-builder stage + `COPY` of the dist; `docker-compose`/`EXPOSE` drop port 18792. Config switches from `channels.webui` (username/password on 18792) to `channels.websocket` (enabled, `0.0.0.0:8765`, `tokenIssueSecret`; loopback auto-trusted, LAN/Tailscale needs the secret via `#/?bootstrapSecret=…`). The upstream WebUI is off by default (`websocket.enabled=false`); this deployment opts in.
 
 ## CLAUDE.md

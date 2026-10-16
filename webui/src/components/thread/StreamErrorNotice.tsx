@@ -38,14 +38,14 @@ export function StreamErrorNotice({ error, onDismiss }: StreamErrorNoticeProps) 
       />
       <div className="flex-1">
         <p className="font-medium">{title}</p>
-        <p className="mt-0.5 text-destructive/80">{body}</p>
+        <p className="mt-0.5 text-destructive">{body}</p>
       </div>
       <Button
         variant="ghost"
         size="icon"
         onClick={onDismiss}
         aria-label={t("common.dismiss")}
-        className="h-6 w-6 shrink-0 text-destructive hover:bg-destructive/15 hover:text-destructive"
+        className="h-6 w-6 shrink-0 text-destructive hover:text-destructive"
       >
         <X className="h-3.5 w-3.5" />
       </Button>

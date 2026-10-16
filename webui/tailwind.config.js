@@ -8,6 +8,7 @@ export default {
   content: [
     "./index.html",
     "./src/**/*.{ts,tsx}",
+    ...(process.env.NODE_ENV === "production" ? ["!./src/dev/**"] : []),
     "../nanobot/channels/*/webui/**/*.{ts,tsx}",
     "./node_modules/streamdown/dist/*.js",
   ],
@@ -91,6 +92,14 @@ export default {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
+        "diff-added": {
+          DEFAULT: "var(--diff-added)",
+          foreground: "var(--diff-added-foreground)",
+        },
+        "diff-deleted": {
+          DEFAULT: "var(--diff-deleted)",
+          foreground: "var(--diff-deleted-foreground)",
+        },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -128,7 +137,8 @@ export default {
   plugins: [
     animate,
     typography,
-    plugin(({ addVariant }) => {
+    plugin(({ addVariant, addUtilities }) => {
+      addUtilities({ ".rounded-full": { cornerShape: "round" } });
       // Revealing controls on emulated hover can consume the first Safari
       // tap. Keep these sidebar hover effects on hover-capable pointers.
       addVariant("media-hover", "@media (hover: hover)");

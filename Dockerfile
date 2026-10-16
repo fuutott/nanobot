@@ -12,6 +12,7 @@ WORKDIR /app/webui
 RUN npm ci
 COPY webui/ ./
 COPY packages/client-events/ /app/packages/client-events/
+COPY nanobot/channels/ /app/nanobot/channels/
 RUN mkdir -p /app/nanobot/web && npm run build
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
@@ -28,38 +29,36 @@ ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 RUN uv venv --seed "$VIRTUAL_ENV"
 
-# Install Python dependencies first (cached layer). Hatch reads the custom build
-# hook from hatch_build.py even for this metadata-only install.
-#
-# Channel deps come from the fork's re-added `discord`/`telegram` extras (see
-# pyproject.toml). Upstream's 462a0dfb moved these into per-channel manifests
-# with a runtime pip auto-installer; we install them at build via the extras
-# instead. Keep this in sync with the enabled channels.
+# Install Python dependencies without building the project (cached layer).
+# Source and documentation changes only invalidate the final package install.
+# Fork: channel deps for our enabled channels come from the `discord`/`telegram`
+# pyproject extras (keep in sync with the enabled channels).
 ARG NANOBOT_EXTRAS=discord,telegram
-COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
-RUN mkdir -p nanobot && touch nanobot/__init__.py && \
-    if [ -n "$NANOBOT_EXTRAS" ]; then \
-        NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
-            --python "$VIRTUAL_ENV/bin/python" --no-cache ".[${NANOBOT_EXTRAS}]"; \
-    else \
-        NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
-            --python "$VIRTUAL_ENV/bin/python" --no-cache .; \
-    fi && \
-    rm -rf nanobot
+COPY pyproject.toml ./
+RUN set -- && \
+    for extra in $(printf '%s' "$NANOBOT_EXTRAS" | tr ',' ' '); do \
+        set -- "$@" --extra "$extra"; \
+    done && \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache -r pyproject.toml "$@"
 
-# Copy the full source, the built gateway WebUI dist, and install. The dist is
-# packaged into the wheel via pyproject's include/artifacts, so the gateway can
-# serve it from the installed nanobot.web package. Install into the writable venv
-# (on PATH) alongside the discord/telegram extras and our two remaining plugin
-# channel packages (webui plugin retired in favour of the gateway WebUI).
+# Copy the full source and install
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
+COPY docs/ docs/
 COPY nanobot/ nanobot/
 COPY plugins/ plugins/
 COPY --from=webui-builder /app/nanobot/web/dist/ nanobot/web/dist/
-RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install \
-        --python "$VIRTUAL_ENV/bin/python" --no-cache ".[$NANOBOT_EXTRAS]" && \
+COPY scripts/install_channel_dependencies.py scripts/
+RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache --no-deps . && \
     uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache \
         /app/plugins/nanobot-channel-openaiapi \
         /app/plugins/nanobot-channel-mcpserver
+
+# Preinstall additional channel dependencies from their manifests. Fork default is
+# empty: discord/telegram come via NANOBOT_EXTRAS and we don't run WhatsApp.
+ARG NANOBOT_CHANNELS=
+RUN for channel in $(printf '%s' "$NANOBOT_CHANNELS" | tr ',' ' '); do \
+        python -m scripts.install_channel_dependencies "$channel"; \
+    done
 
 # Render deploy template (see render.yaml): committed gateway config that wires
 # secrets through ${ANTHROPIC_API_KEY} / ${NANOBOT_WEB_TOKEN} env vars (resolved

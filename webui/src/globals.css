@@ -24,15 +24,24 @@
     --secondary: 0 0% 96.1%;
     --secondary-foreground: 0 0% 9%;
     --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
+    --muted-foreground: 240 4% 40%;
     --accent: 0 0% 96.1%;
     --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
+    --destructive: 0 73.7% 41.8%;
     --destructive-foreground: 0 0% 98%;
     --border: 40 8% 90.5%;
     --input: 40 8% 90.5%;
     --ring: 0 0% 3.9%;
-    --inline-token-highlight: #ef8e30;
+    --inline-token-highlight: #ad450b;
+    --code-comment: #62626b;
+    --code-string: #166534;
+    --code-keyword: #7e22ce;
+    --code-function: #1d4ed8;
+    --code-property: #854d0e;
+    --diff-added: rgb(16 185 129 / 0.09);
+    --diff-added-foreground: #047857;
+    --diff-deleted: rgb(244 63 94 / 0.09);
+    --diff-deleted-foreground: #be123c;
     --usage-token: 29 86% 56%;
     --session-handle-lightness: 0.5;
     --session-handle-chroma: 0.12;
@@ -45,9 +54,10 @@
     --radius-control: 0.75rem;
     --radius-floating: 1.125rem;
     --radius-panel: 1.375rem;
-    --radius-modal: 1.375rem;
+    --radius-modal: 2rem;
     --radius-prominent: 1.75rem;
     --radius-pill: 9999px;
+    --corner-shape: superellipse(1.5);
     --content-column-width: 49.5rem;
     --sidebar: 40 8% 96.8%;
     --sidebar-foreground: 0 0% 3.9%;
@@ -77,15 +87,25 @@
     --secondary: var(--card);
     --secondary-foreground: 0 0% 98%;
     --muted: var(--card);
-    --muted-foreground: 0 0% 65%;
+    --muted-foreground: 0 0% 72%;
     --accent: 0 0% 25%;
     --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
+    /* Destructive text needs contrast on dark surfaces; filled controls use a dark label. */
+    --destructive: 0 93.5% 81.8%;
+    --destructive-foreground: 0 0% 9%;
     --border: 0 0% 28%;
     --input: var(--border);
     --ring: 0 0% 83.1%;
     --inline-token-highlight: #ef8e30;
+    --code-comment: #c8c8d0;
+    --code-string: #b5d99c;
+    --code-keyword: #e3a5f7;
+    --code-function: #93c5fd;
+    --code-property: #f6c177;
+    --diff-added: rgb(110 231 183 / 0.11);
+    --diff-added-foreground: #6ee7b7;
+    --diff-deleted: rgb(253 164 175 / 0.11);
+    --diff-deleted-foreground: #fda4af;
     --session-handle-lightness: 0.75;
     --session-handle-chroma: 0.11;
     --temporary-control-active: #ef8e30;
@@ -111,6 +131,12 @@
     @apply border-border;
   }
 
+  *,
+  ::before,
+  ::after {
+    corner-shape: var(--corner-shape);
+  }
+
   html,
   body,
   #root {
@@ -120,6 +146,57 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     overflow: hidden;
+    text-autospace: normal;
+  }
+
+  /* Keep source text and editable values visually literal. */
+  pre,
+  code,
+  kbd,
+  samp,
+  .font-mono,
+  input,
+  textarea,
+  [contenteditable="true"] {
+    text-autospace: no-autospace;
+  }
+
+  #root.visual-viewport {
+    position: fixed;
+    top: var(--app-viewport-top);
+    left: 0;
+    width: 100%;
+    height: var(--app-viewport-height);
+  }
+
+  /* A landscape keyboard can leave less room than the composer needs. Keep
+     navigation reachable and scroll the composer instead of overlapping it. */
+  #root.visual-viewport .workbench-body {
+    min-height: 2.75rem;
+  }
+
+  #root.short-visual-viewport .workbench-composer-footer {
+    max-height: max(0px, calc(var(--app-viewport-height) - 2.75rem));
+    overflow-y: auto;
+  }
+
+  /* Body portals share the viewport owner's short-frame state. A landscape
+     keyboard needs input and results beside each other, not stacked. */
+  @media (min-width: 640px) {
+    body:has(> #root.short-visual-viewport) .session-search-dialog {
+      flex-direction: row;
+    }
+
+    body:has(> #root.short-visual-viewport) .session-search-input {
+      width: 40%;
+      height: auto;
+      border-bottom-width: 0;
+      border-right-width: 1px;
+    }
+
+    body:has(> #root.short-visual-viewport) .session-search-label {
+      @apply sr-only;
+    }
   }
 
   * {
@@ -326,19 +403,26 @@
     @apply list-none pl-0;
   }
 
-  /* CJK-friendly line-height: prose paragraphs default to 1.625 which is
-     tight for Chinese/Japanese/Korean characters. Bump to 1.8 for better
-     readability when the browser detects a CJK primary font. */
+  /* Set the default before locale overrides: html also matches :lang(). */
+  :root {
+    --cjk-line-height: 1.625;
+  }
+
   :lang(zh),
-  :lang(zh-CN),
-  :lang(zh-TW),
-  :lang(zh-HK),
   :lang(ja),
   :lang(ko) {
     --cjk-line-height: 1.8;
   }
-  :root {
-    --cjk-line-height: 1.625;
+
+  /* Balance short headings; preserve explicit line breaks in chat prose. */
+  .markdown-content :is(h1, h2, h3, h4, h5, h6),
+  .settings-section-title {
+    text-wrap: balance;
+  }
+
+  .activity-current,
+  .streaming-text-sheen {
+    --activity-animation: 2.8s ease-in-out infinite;
   }
 
   /* L→R sheen clipped to live activity labels. The highlight lives inside
@@ -359,7 +443,7 @@
     color: inherit;
   }
   .streaming-text-sheen::after {
-    content: attr(data-sheen-text);
+    content: attr(data-sheen-text) / "";
     position: absolute;
     inset: 0;
     display: block;
@@ -367,6 +451,7 @@
     white-space: nowrap;
     text-overflow: ellipsis;
     pointer-events: none;
+    padding-right: inherit;
     color: transparent;
     background: linear-gradient(
       90deg,
@@ -382,7 +467,7 @@
     background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: streaming-text-sheen-ltr 2.8s ease-in-out infinite;
+    animation: streaming-text-sheen-ltr var(--activity-animation);
   }
   .dark .streaming-text-sheen::after {
     background-image: linear-gradient(
@@ -631,7 +716,7 @@
     }
   }
   /* Split content leaves no margin for floating conversation controls. */
-  .thread-workspace:has([data-file-preview-panel]) > * {
+  .thread-preview-layout[data-preview-open] > .thread-conversation {
     --thread-header-position: relative;
   }
   /* Keep room for the 49.5rem message column and controls in the side margin. */
@@ -846,7 +931,41 @@
   }
 }
 
+.workspace-picker-favorite {
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.workspace-picker-row:hover .workspace-picker-favorite,
+.workspace-picker-row:focus-within .workspace-picker-favorite,
+.workspace-picker-row[data-keyboard-active] .workspace-picker-favorite {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .workspace-picker-favorite {
+    pointer-events: auto;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-picker-favorite {
+    transition: none;
+  }
+}
+
 @media (pointer: coarse) {
+  /* Readable form text avoids Safari's focus zoom without disabling the user's
+     pinch zoom. Keep this after utilities so compact desktop overrides cannot
+     shrink shared form fields on touch devices. Larger chat/search text stays
+     on its own typography; this is not a blanket rule for every input. */
+  .touch-text-input {
+    font-size: max(16px, 1rem);
+  }
+
   .thread-message-row,
   .message-block-menu-trigger,
   [data-message-block-menu] {
@@ -858,6 +977,15 @@
   .touch-target {
     min-width: 2.75rem;
     min-height: 2.75rem;
+  }
+
+  .touch-target.preview-tab-close {
+    opacity: 1;
+  }
+
+  /* Touch users cannot hover a sidebar row to discover its actions. */
+  .sidebar-action-trigger {
+    opacity: 1;
   }
 }
 
@@ -897,38 +1025,22 @@
   mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 0.75rem), transparent);
 }
 
-.thread-composer-model-badge:not([data-switching="true"]):active > .composer-model-pill {
-  transform: scale(0.98);
-}
-
 .composer-model-pill-setup {
   border-color: hsl(var(--border) / 0.72);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.62),
-    0 1px 2px hsl(var(--foreground) / 0.035);
-  transition-property: color, background-color, border-color, box-shadow, transform;
-  transition-duration: 180ms;
-  transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-.dark .composer-model-pill-setup {
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.045),
-    0 1px 2px rgb(0 0 0 / 0.12);
+  transition: color 150ms ease-out, background-color 150ms ease-out, border-color 150ms ease-out;
 }
 
 .thread-composer-model-badge:hover > .composer-model-pill-setup {
   border-color: hsl(var(--border));
-  background-color: hsl(var(--accent) / 0.7);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.72),
-    0 2px 5px hsl(var(--foreground) / 0.06);
+  background-color: hsl(var(--foreground) / 0.045);
 }
 
 .dark .thread-composer-model-badge:hover > .composer-model-pill-setup {
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.07),
-    0 2px 5px rgb(0 0 0 / 0.16);
+  background-color: rgb(255 255 255 / 0.065);
+}
+
+.thread-composer-model-badge:not([data-switching="true"]):active > .composer-model-pill {
+  background-color: hsl(var(--foreground) / 0.085);
 }
 
 @keyframes composer-model-pill-setup-attention {
@@ -1066,7 +1178,7 @@
   align-items: center;
 }
 
-/* Keep a 44px hit area around the quieter 36px attachment/send circles.
+/* Keep a 44px hit area around the quieter 36px attachment/send controls.
  * The transparent pseudo-element belongs to the button, including its disabled
  * state; margins reserve its space so adjacent controls never overlap it. */
 [data-compact-controls] .thread-composer-round-action.touch-target {
@@ -1096,8 +1208,26 @@
 
 .thread-composer-meta .thread-composer-access {
   max-width: 100%;
-  padding-inline: 0.5rem;
+  padding-inline: 0.625rem 0.5rem;
 }
+
+.thread-composer-workspace-row {
+  padding-inline: 0.75rem;
+}
+
+.thread-composer-workspace-row .touch-target {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+}
+
+.thread-composer-workspace-row .thread-composer-access {
+  padding-inline-end: 0;
+}
+
+.thread-composer-workspace-row .thread-composer-workspace {
+  padding-inline-start: 0.6875rem;
+}
+
 @media (forced-colors: active) {
   [data-workbench-move-handle]:focus-visible {
     outline: 2px solid CanvasText;
@@ -1292,7 +1422,15 @@
   }
   .settings-section-heading > .settings-section-title { margin: 0; padding: 0; }
   .settings-stack > .settings-section-heading + :not([hidden]) { margin-block-start: 20px; }
-  .settings-row, .settings-footer {
+  .control-layout {
+    display: flex;
+    height: 2.25rem;
+    align-items: center;
+    gap: 0.5rem;
+    border-width: 1px;
+    padding-inline: 0.75rem;
+  }
+  .settings-row, .settings-footer, .settings-disclosure-row {
     display: grid;
     grid-template-columns: repeat(var(--settings-columns, 4), minmax(0, 1fr));
     column-gap: var(--settings-gutter, 16px);
@@ -1302,6 +1440,7 @@
     min-block-size: 60px;
   }
   .settings-row > *, .settings-footer > * { grid-column: 1 / -1; min-inline-size: 0; }
+  .settings-disclosure-row { grid-template-columns: minmax(0, 1fr) auto; }
   .settings-control { display: flex; align-items: center; max-inline-size: 100%; }
   .settings-control > * { max-inline-size: 100%; }
   .settings-control input, .settings-control textarea { max-inline-size: 100%; text-align: start; }
@@ -1316,30 +1455,66 @@
   }
   .settings-row:has(> .settings-control > [role="switch"]) > :first-child { grid-column: 1; }
   .settings-row:has(> .settings-control > [role="switch"]) > :nth-child(2) { grid-column: 2; }
-  .settings-disclosure > summary {
-    cursor: pointer;
-    padding: 12px var(--settings-inset, 16px);
-    border-radius: var(--radius-control, 12px);
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 20px;
-    color: hsl(var(--muted-foreground));
-  }
-  .settings-disclosure > summary:hover { color: hsl(var(--foreground)); }
-  .settings-disclosure > summary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
-  .settings-disclosure[open] > summary { margin-block-end: 8px; }
-
   .settings-list-row, .settings-list-inset { padding-inline: var(--settings-inset, 16px); }
-  .settings-list-row { min-block-size: 60px; border-radius: 12px; }
-  .sidebar-action-label:lang(zh) {
-    display: inline-block;
-    min-inline-size: var(--sidebar-label-width, 3em);
-    text-align: justify;
-    text-align-last: justify;
+  .settings-list-row { min-block-size: 60px; border-radius: var(--radius-control); }
+  .settings-list-row:focus-visible { outline: none; }
+  .icon-action[aria-pressed="true"], .icon-action[data-state="open"] {
+    color: hsl(var(--foreground));
+  }
+  .icon-action[aria-pressed="true"]::after, .icon-action[data-state="open"]::after {
+    content: "";
+    position: absolute;
+    bottom: 3px;
+    left: calc(50% - 4px);
+    width: 8px;
+    height: 2px;
+    border-radius: 1px;
+    background-color: currentColor;
+    pointer-events: none;
+  }
+  .icon-action svg {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .icon-action [data-product-icon="settings"] {
+      transform: rotate(0deg);
+      transition: transform 300ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    .icon-action:not(:disabled):hover [data-product-icon="settings"] {
+      transform: rotate(90deg);
+    }
+  }
+  .activity-current-trace { display: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    .activity-current > path:first-child { opacity: 0.35; }
+    .activity-current-trace {
+      display: block;
+      stroke-dasharray: 16 84;
+      animation: activity-current-flow var(--activity-animation);
+    }
+  }
+  @keyframes activity-current-flow {
+    0% { stroke-dashoffset: 16; opacity: 0; }
+    50% { opacity: 1; }
+    100% { stroke-dashoffset: 116; opacity: 0; }
+  }
+  .quiet-control, .settings-hover {
+    --control-hover-fill: hsl(var(--foreground) / 0.045);
+    --control-active-fill: hsl(var(--foreground) / 0.085);
+  }
+  .dark .quiet-control, .dark .settings-hover {
+    --control-hover-fill: rgb(255 255 255 / 0.065);
+    --control-active-fill: rgb(255 255 255 / 0.105);
   }
   @media (hover: hover) {
-    .settings-hover:hover { background-color: hsl(var(--sidebar-foreground) / 0.055); }
-    .dark .settings-hover:hover { background-color: rgb(255 255 255 / 0.07); }
+    .quiet-control:hover, .settings-hover:hover {
+      background-color: var(--control-hover-fill);
+    }
+  }
+  .quiet-control:active, .settings-hover:active,
+  .quiet-control[data-state="open"], .quiet-control[aria-pressed="true"] {
+    background-color: var(--control-active-fill);
   }
   .settings-editor { padding: 16px var(--settings-inset, 16px); }
   @media (min-width: 640px) {
@@ -1438,4 +1613,58 @@
 
 @media (prefers-reduced-motion: reduce) {
   .sidebar-scrollbar::-webkit-scrollbar-thumb { transition: none; }
+}
+
+.workspace-directory-loading {
+  position: relative;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .workspace-directory-loading::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, hsl(var(--foreground) / 0.045), transparent);
+    transform: translateX(-100%);
+    animation: workspace-directory-shimmer 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes workspace-directory-shimmer {
+  to { transform: translateX(100%); }
+}
+
+/* Prism classes are generated at runtime, outside Tailwind's source inventory. */
+.code-content {
+  color: hsl(var(--foreground));
+}
+/* Flattened JSX tokens retain the ancestor tag class; let inner token types win. */
+.code-content .token.tag {
+  color: var(--code-property);
+}
+.code-content :is(.token.comment, .token.prolog, .token.doctype, .token.cdata, .linenumber) {
+  color: var(--code-comment);
+}
+.code-content .token.comment {
+  font-style: italic;
+}
+.code-content :is(.token.string, .token.char, .token.attr-value, .token.regex, .token.inserted) {
+  color: var(--code-string);
+}
+.code-content :is(.token.keyword, .token.selector, .token.important, .token.atrule) {
+  color: var(--code-keyword);
+}
+.code-content :is(.token.function, .token.operator, .token.entity, .token.url) {
+  color: var(--code-function);
+}
+.code-content :is(.token.number, .token.boolean, .token.constant, .token.symbol, .token.attr-name, .token.class-name, .token.builtin, .token.property, .token.deleted) {
+  color: var(--code-property);
+}
+.code-content :is(.token.bold, .token.important) {
+  font-weight: 600;
+}
+.code-content .token.italic {
+  font-style: italic;
 }

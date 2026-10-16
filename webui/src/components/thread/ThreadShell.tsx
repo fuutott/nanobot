@@ -15,6 +15,7 @@ import { SessionHandleLabel } from "@/components/SessionHandleLabel";
 import { PromptNavigator } from "@/components/thread/PromptNavigator";
 import { ModelFallbackNotice } from "@/components/thread/ModelFallbackNotice";
 import { RecoveryNotice } from "@/components/thread/RecoveryNotice";
+import { SubagentTasksProvider } from "@/components/thread/SubagentTasks";
 import { SessionInfoPopover } from "@/components/thread/SessionInfoPopover";
 import type { ComposerDraftStore } from "@/lib/composer-draft";
 import { ThreadComposer } from "@/components/thread/ThreadComposer";
@@ -40,6 +41,8 @@ import {
   fetchInstalledCliApps,
   fetchMcpPresets,
   fetchSettings,
+  fetchWorkspaces,
+  fetchWorkspaceDirectories,
   fetchWebuiThreadTraceDetail,
   listSlashCommands,
 } from "@/lib/api";
@@ -65,10 +68,12 @@ import type {
   UIMessage,
   WorkspaceScopePayload,
   WorkspacesPayload,
+  ProjectDirectory,
 } from "@/lib/types";
 import { projectThreadEvents } from "@/lib/thread-event-projection";
 import { projectWebuiThreadMessages } from "@/lib/thread-display-projection";
 import { ThreadMessageCache } from "@/lib/thread-message-cache";
+import { canonicalRunSnapshot, completedAssistantTurnIds } from "@/lib/canonical-run-snapshot";
 import { providerDisplayLabel } from "@/lib/provider-brand";
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
@@ -76,6 +81,7 @@ import { useClient } from "@/providers/ClientProvider";
 type MessageShape = Pick<UIMessage, "role" | "kind" | "content" | "isStreaming" | "turnId">;
 
 interface PendingCanonicalHydrate {
+  source: "initial" | "refresh";
   historyLineage: number;
   historyVersion: number;
   runGeneration: number;
@@ -354,28 +360,120 @@ function hasInlineDeliveryError(
   ));
 }
 
-function completedAssistantTurnIds(messages: UIMessage[]): string[] {
-  return Array.from(new Set(
-    messages
-      .filter((message) => message.role === "assistant" && !!message.turnId)
-      .map((message) => message.turnId as string),
-  ));
-}
-
-function canonicalRunSnapshot(
-  messages: UIMessage[],
-  hasPendingToolCalls: boolean,
-  activeTurnId: string | null,
-): CanonicalRunSnapshot {
-  return {
-    observedTurnIds: Array.from(new Set(
-      messages
-        .filter((message) => message.role === "user" && !!message.turnId)
-        .map((message) => message.turnId as string),
-    )),
-    hasPendingToolCalls,
-    activeTurnId,
+function replaceCanonicalCompletedTurns(
+  current: UIMessage[],
+  canonical: UIMessage[],
+  completedTurnIds: readonly string[],
+): UIMessage[] {
+  const completed = new Set(completedTurnIds);
+  const represented = new Set(canonical.flatMap((message) => (
+    message.turnId && completed.has(message.turnId) ? [message.turnId] : []
+  )));
+  if (!current.some((message) => message.turnId && represented.has(message.turnId))) {
+    return current;
+  }
+  const retained: UIMessage[] = [];
+  const originalPositions = new Map<string, number>();
+  for (const message of current) {
+    if (message.turnId && represented.has(message.turnId)) {
+      if (!originalPositions.has(message.turnId)) {
+        originalPositions.set(message.turnId, retained.length);
+      }
+    } else {
+      retained.push(message);
+    }
+  }
+  // Supplemental inputs may have their own turn identity between two answer
+  // segments. Match those retained rows as anchors so completed rows keep the
+  // canonical chronology instead of being grouped at the first turn row.
+  type AnchorQueue = { indices: number[]; offset: number };
+  type ShapeAnchors = {
+    all: AnchorQueue;
+    byTurnId: Map<string | undefined, AnchorQueue>;
   };
+  const anchorIndex = new Map<string, Map<string, ShapeAnchors>>();
+  for (let index = 0; index < retained.length; index += 1) {
+    const message = retained[index];
+    const shape = JSON.stringify([message.role, message.kind ?? ""]);
+    let byContent = anchorIndex.get(shape);
+    if (!byContent) {
+      byContent = new Map();
+      anchorIndex.set(shape, byContent);
+    }
+    let positions = byContent.get(message.content);
+    if (!positions) {
+      positions = {
+        all: { indices: [], offset: 0 },
+        byTurnId: new Map(),
+      };
+      byContent.set(message.content, positions);
+    }
+    positions.all.indices.push(index);
+    const turnId = message.turnId || undefined;
+    const queue = positions.byTurnId.get(turnId) ?? { indices: [], offset: 0 };
+    queue.indices.push(index);
+    positions.byTurnId.set(turnId, queue);
+  }
+  let cursor = 0;
+  let fallbackBoundary = 0;
+  const firstAnchor = (queue: AnchorQueue | undefined, minimumIndex: number): number => {
+    if (!queue) return retained.length;
+    while (queue.offset < queue.indices.length && queue.indices[queue.offset] < minimumIndex) {
+      queue.offset += 1;
+    }
+    return queue.indices[queue.offset] ?? retained.length;
+  };
+  const anchors = canonical.map((message) => {
+    if (message.turnId && represented.has(message.turnId)) {
+      // Keep anonymous matches after this turn's retained pagination prefix.
+      fallbackBoundary = Math.max(fallbackBoundary, originalPositions.get(message.turnId) ?? 0);
+      return -1;
+    }
+    const positions = anchorIndex
+      .get(JSON.stringify([message.role, message.kind ?? ""]))
+      ?.get(message.content);
+    const exactIndex = message.turnId
+      ? firstAnchor(positions?.byTurnId.get(message.turnId), cursor)
+      : retained.length;
+    const index = exactIndex < retained.length
+      ? exactIndex
+      : firstAnchor(
+          message.turnId ? positions?.byTurnId.get(undefined) : positions?.all,
+          Math.max(cursor, fallbackBoundary),
+        );
+    if (index === retained.length) return -1;
+    cursor = index + 1;
+    return index;
+  });
+  const nextAnchors = new Array<number | undefined>(anchors.length);
+  let nextAnchor: number | undefined;
+  for (let index = anchors.length - 1; index >= 0; index -= 1) {
+    nextAnchors[index] = nextAnchor;
+    if (anchors[index] >= 0) nextAnchor = anchors[index];
+  }
+  const insertions = new Map<number, UIMessage[]>();
+  let precedingAnchor = 0;
+  let previousInsertionPosition = 0;
+  for (let index = 0; index < canonical.length; index += 1) {
+    if (anchors[index] >= 0) precedingAnchor = anchors[index] + 1;
+    const message = canonical[index];
+    if (!message.turnId || !represented.has(message.turnId)) continue;
+    const position = Math.max(
+      previousInsertionPosition,
+      nextAnchors[index] ?? Math.max(
+        precedingAnchor,
+        originalPositions.get(message.turnId) ?? precedingAnchor,
+      ),
+    );
+    previousInsertionPosition = position;
+    const rows = insertions.get(position) ?? [];
+    rows.push(message);
+    insertions.set(position, rows);
+  }
+  return retained.flatMap((message, index) => [
+    ...insertions.get(index) ?? [],
+    message,
+  ]).concat(insertions.get(retained.length) ?? []);
 }
 
 const FILE_PREVIEW_DEFAULT_WIDTH = 544;
@@ -537,6 +635,7 @@ function randomHeroGreetingKey(): (typeof HERO_GREETING_KEYS)[number] {
 }
 
 interface PendingFirstMessage {
+  finish?: (accepted: boolean) => void;
   content: string;
   images?: SendAttachment[];
   options?: SendOptions;
@@ -689,6 +788,7 @@ export function ThreadShell({
     userMessageOffset,
     hasPendingToolCalls,
     completedTurnIds,
+    completionIdsProvided,
     continuity: historyContinuity,
     lineage: historyLineage,
     activeTurnId: historyActiveTurnId,
@@ -696,15 +796,24 @@ export function ThreadShell({
     version: historyVersion,
     forkBoundaryMessageCount,
   } = useSessionHistory(historyKey);
-  const { client, getToken, ingressLimits, modelName, token } = useClient();
-  const pickWorkspaceFolder = useCallback(async (): Promise<string | null> => {
-    const response = await client.requestMutation<{ path: unknown }>(
-      "workspace.pick_folder",
-      {},
-      300_000,
-    );
-    return typeof response.path === "string" ? response.path : null;
-  }, [client]);
+  const { client, getToken, ingressLimits, modelName, token, webuiCapabilities } = useClient();
+  const favoriteWorkspaceProject = useCallback(
+    async (path: string, pinned: boolean) => {
+      const response = await client.requestMutation<{ favorite_projects: ProjectDirectory[] }>("workspace.favorite", { path, pinned });
+      return response.favorite_projects;
+    },
+    [client],
+  );
+  const resolveWorkspaceProject = useCallback(
+    (path: string) => client.requestMutation<ProjectDirectory>("workspace.resolve_project", { path }),
+    [client],
+  );
+  const loadWorkspaceProjects = useCallback(() => fetchWorkspaces(getToken()), [getToken]);
+  const browseWorkspaceDirectories = useCallback(
+    (path: string, query: string, showHidden: boolean, allowPartial = false) =>
+      fetchWorkspaceDirectories(getToken(), path, query, showHidden, allowPartial),
+    [getToken],
+  );
   const [booting, setBooting] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [mentionCatalogRequestCount, setMentionCatalogRequestCount] = useState(0);
@@ -754,6 +863,7 @@ export function ThreadShell({
   }, [draftKey]);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const shellRef = useRef<HTMLElement | null>(null);
+  const [conversationElement, setConversationElement] = useState<HTMLDivElement | null>(null);
   const composerSurfaceRef = useRef<HTMLDivElement | null>(null);
   const filePreviewWidthRef = useRef(FILE_PREVIEW_DEFAULT_WIDTH);
   const filePreviewCloseTimerRef = useRef<number | null>(null);
@@ -791,8 +901,11 @@ export function ThreadShell({
 
   const initial = useMemo(() => {
     if (!chatId) return historical;
-    return messageCacheRef.current.get(chatId) ?? historical;
-  }, [chatId, historical]);
+    const cached = messageCacheRef.current.get(chatId);
+    return cached
+      ? replaceCanonicalCompletedTurns(cached, historical, completedTurnIds)
+      : historical;
+  }, [chatId, completedTurnIds, historical]);
   const handleTurnEnd = useCallback(() => {
     if (chatId) activeViewportTurnByChatIdRef.current.delete(chatId);
     setSubmittedViewportTurnId(null);
@@ -818,7 +931,9 @@ export function ThreadShell({
     setMessages,
     streamError,
     dismissStreamError,
-  } = useNanobotStream(chatId, initial, hasPendingToolCalls, handleTurnEnd, handleStreamDetach);
+  } = useNanobotStream(
+    chatId, initial, hasPendingToolCalls, handleTurnEnd, handleStreamDetach, completedTurnIds,
+  );
 
   const loadTraceDetails = useCallback(async (refs: string[]) => {
     const requestKey = historyKey;
@@ -1130,37 +1245,75 @@ export function ThreadShell({
   }, [client, refreshModelSettings]);
 
   useEffect(() => {
+    if (!historyKey || !chatId) return;
+    pendingCanonicalHydrateRef.current.set(chatId, {
+      source: "initial",
+      historyLineage,
+      historyVersion,
+      runGeneration: client.getRunGeneration(chatId),
+      uiBaseline: durableMessageShapes(initial),
+      uiLineage: committedHistoryLineageRef.current.get(chatId) ?? null,
+      uiRevision: uiRevisionRef.current,
+    });
+    // Capture the request's run generation when entering a conversation, before
+    // its history response can race with another send or running event.
+  }, [chatId, client, historyKey]);
+
+  const canonicalCompletedTurnIds = useMemo(() => Array.from(new Set([
+    ...completedTurnIds,
+    ...(!completionIdsProvided && !hasPendingToolCalls && historyActiveTurnId === null
+      ? completedAssistantTurnIds(projectWebuiThreadMessages(historical))
+      : []),
+  ])), [completedTurnIds, completionIdsProvided, hasPendingToolCalls, historical, historyActiveTurnId]);
+
+  const lastRunTurnId = chatId ? client.getRunTurnId(chatId) : null;
+  const completedRunTurnId = chatId && lastRunTurnId && client.isRunCompleted(chatId, lastRunTurnId)
+    ? lastRunTurnId : null;
+  const queueCompletedTurnIds = useMemo(() => {
+    const canonical = hasPendingToolCalls ? [] : canonicalCompletedTurnIds;
+    // Live terminal facts can release the queue before the history refresh finishes.
+    return completedRunTurnId && !canonical.includes(completedRunTurnId)
+      ? [...canonical, completedRunTurnId] : canonical;
+  }, [canonicalCompletedTurnIds, completedRunTurnId, hasPendingToolCalls]);
+
+  useEffect(() => {
     if (!historyKey || !chatId || loading) return;
-    client.fenceCanonicalCompletedTurns(chatId, completedTurnIds);
-    const cached = messageCacheRef.current.get(chatId);
     const pendingCanonicalHydrate = pendingCanonicalHydrateRef.current.get(chatId);
-    const hasNewCanonicalHistory = (
+    const shouldReconcileRun = (
       pendingCanonicalHydrate !== undefined
       && historyVersion > pendingCanonicalHydrate.historyVersion
+      && !hasPendingToolCalls
+      && (
+        pendingCanonicalHydrate.source === "refresh"
+        || (
+          (historical.length > 0 || completedTurnIds.length > 0)
+          && (isStreaming || runStartedAt !== null || client.hasUnsettledRun(chatId))
+        )
+      )
     );
-    // When the user switches away and back, keep the local in-memory thread
-    // state (including not-yet-persisted messages) instead of replacing it with
-    // whatever the history endpoint currently knows about. Once a fresh
-    // canonical replay arrives (e.g. after ``session_updated`` refresh), prefer it
-    // so rendering converges to the same shape as a manual refresh.
     const normalizedHistory = projectWebuiThreadMessages(historical);
-    const keepLiveMessages = (current: UIMessage[]) => projectWebuiThreadMessages(current);
-    if (hasNewCanonicalHistory && pendingCanonicalHydrate) {
-      // Transcript replay strips streaming metadata and uses persisted ids.
-      // Never adopt it while the turn is active: even if no assistant delta
-      // arrived locally yet, the next resumed delta must create/continue the
-      // live cursor rather than append to an immutable replay row.
-      if (hasPendingToolCalls) {
-        setMessages((current) => keepLiveMessages(current));
-        return;
-      }
+    // Completion is a fact about a turn, even when a newer local turn prevents
+    // this snapshot from settling the conversation's current run.
+    client.fenceCanonicalCompletedTurns(chatId, canonicalCompletedTurnIds);
+    const keepLiveMessages = (current: UIMessage[]) => {
+      const reconciled = projectWebuiThreadMessages(
+        replaceCanonicalCompletedTurns(current, normalizedHistory, canonicalCompletedTurnIds),
+      );
+      const firstId = reconciled[0]?.id;
+      const prefixLength = normalizedHistory.findIndex((message) => message.id === firstId);
+      return prefixLength > 0
+        ? [...normalizedHistory.slice(0, prefixLength), ...reconciled]
+        : reconciled;
+    };
+    if (shouldReconcileRun && pendingCanonicalHydrate) {
       const authoritativeReset = (
         pendingCanonicalHydrate.uiLineage !== null
         && historyLineage !== pendingCanonicalHydrate.uiLineage
         && (
           historyContinuity === "reset"
           || (
-            historyContinuity === "overlap"
+            pendingCanonicalHydrate.source === "refresh"
+            && historyContinuity === "overlap"
             && historyLineage === pendingCanonicalHydrate.historyLineage
           )
         )
@@ -1183,14 +1336,11 @@ export function ThreadShell({
         setMessages((current) => keepLiveMessages(current));
         return;
       }
-      const canonicalCompletedTurnIds = Array.from(new Set([
-        ...completedTurnIds,
-        ...completedAssistantTurnIds(normalizedHistory),
-      ]));
       const canonicalSnapshot = canonicalRunSnapshot(
         normalizedHistory,
         hasPendingToolCalls,
         historyActiveTurnId,
+        completionIdsProvided,
       );
       if (!client.canReconcileCanonicalCompletion(
         chatId,
@@ -1209,7 +1359,7 @@ export function ThreadShell({
         historyVersion,
         hydrate: pendingCanonicalHydrate,
         messages: normalizedHistory,
-        previousMessages: messages,
+        previousMessages: keepLiveMessages(messages),
       });
       setMessages((current) => {
         if (current !== messages) return current;
@@ -1224,12 +1374,11 @@ export function ThreadShell({
       });
       return;
     }
-    const adoptsNormalizedHistory = cached && cached.length > 0
-      ? (
-          normalizedHistory.length > cached.length
-          && !isStaleThreadSnapshot(messages, normalizedHistory)
-        )
-      : !isStaleThreadSnapshot(messages, normalizedHistory);
+    const reconciledMessages = keepLiveMessages(messages);
+    const adoptsNormalizedHistory = (
+      (!hasPendingToolCalls || messages.length === 0)
+      && !isStaleThreadSnapshot(reconciledMessages, normalizedHistory, true)
+    );
     if (adoptsNormalizedHistory) {
       pendingHistoryLineageCommitRef.current.set(chatId, {
         lineage: historyLineage,
@@ -1237,24 +1386,19 @@ export function ThreadShell({
       });
     }
     setMessages((current) => {
-      if (cached && cached.length > 0) {
-        if (
-          normalizedHistory.length > cached.length
-          && !isStaleThreadSnapshot(current, normalizedHistory)
-        ) {
-          return normalizedHistory;
-        }
-        return isStaleThreadSnapshot(current, cached) ? keepLiveMessages(current) : cached;
-      }
-      return isStaleThreadSnapshot(current, normalizedHistory)
-        ? keepLiveMessages(current)
-        : normalizedHistory;
+      const reconciled = keepLiveMessages(current);
+      return (hasPendingToolCalls && current.length > 0)
+        || isStaleThreadSnapshot(reconciled, normalizedHistory, true)
+          ? reconciled
+          : normalizedHistory;
     });
   }, [
     loading,
     chatId,
     client,
     completedTurnIds,
+    canonicalCompletedTurnIds,
+    completionIdsProvided,
     historical,
     historyVersion,
     historyContinuity,
@@ -1280,21 +1424,21 @@ export function ThreadShell({
       pendingCanonicalCommitRef.current.delete(chatId);
       return;
     }
-    if (uiRevisionRef.current !== commit.expectedUiRevision) {
+    if (
+      uiRevisionRef.current !== commit.expectedUiRevision
+      || !client.reconcileCanonicalCompletion(
+        chatId,
+        commit.hydrate.runGeneration,
+        commit.completedTurnIds,
+        commit.canonicalSnapshot,
+      )
+    ) {
       pendingCanonicalCommitRef.current.delete(chatId);
-      const fallback = messageCacheRef.current.get(chatId) ?? commit.previousMessages;
-      messageCacheRef.current.set(chatId, fallback);
-      setMessages((current) => current === commit.messages ? fallback : current);
-      return;
-    }
-    if (!client.reconcileCanonicalCompletion(
-      chatId,
-      commit.hydrate.runGeneration,
-      commit.completedTurnIds,
-      commit.canonicalSnapshot,
-    )) {
-      pendingCanonicalCommitRef.current.delete(chatId);
-      const fallback = messageCacheRef.current.get(chatId) ?? commit.previousMessages;
+      const fallback = replaceCanonicalCompletedTurns(
+        messageCacheRef.current.get(chatId) ?? commit.previousMessages,
+        commit.messages,
+        commit.completedTurnIds,
+      );
       messageCacheRef.current.set(chatId, fallback);
       setMessages((current) => current === commit.messages ? fallback : current);
       return;
@@ -1315,6 +1459,7 @@ export function ThreadShell({
   const refreshCanonicalHistory = useCallback(() => {
     if (!historyKey || !chatId) return;
     pendingCanonicalHydrateRef.current.set(chatId, {
+      source: "refresh",
       historyLineage,
       historyVersion,
       runGeneration: client.getRunGeneration(chatId),
@@ -1441,6 +1586,9 @@ export function ThreadShell({
       activeViewportTurnByChatIdRef.current.set(chatId, submitted.turnId);
       setSubmittedViewportTurnId(submitted.turnId);
     }
+    if (submitted?.delivery) {
+      void submitted.delivery.then(() => pending.finish?.(true), () => pending.finish?.(false));
+    } else pending.finish?.(submitted !== null);
     setBooting(false);
   }, [chatId, pendingFirstTargetChatId, send]);
 
@@ -1488,7 +1636,9 @@ export function ThreadShell({
     async (content: string, images?: SendAttachment[], options?: SendOptions) => {
       if (booting) return false;
       setBooting(true);
-      pendingFirstRef.current = { content, images, options: withWorkspaceScope(options) };
+      let finish!: (accepted: boolean) => void;
+      const delivery = new Promise<boolean>((resolve) => { finish = resolve; });
+      pendingFirstRef.current = { content, images, options: withWorkspaceScope(options), finish };
       setPendingFirstTargetChatId(null);
       const newId = await onCreateChat?.(workspaceScope, content, localModelPreset);
       if (!newId) {
@@ -1501,7 +1651,7 @@ export function ThreadShell({
         await client.sendSystemCommand(newId, `/model ${localModelPreset}`).catch(() => {});
       }
       setPendingFirstTargetChatId(newId);
-      return true;
+      return delivery;
     },
     [booting, client, localModelPreset, onCreateChat, withWorkspaceScope, workspaceScope],
   );
@@ -1518,7 +1668,7 @@ export function ThreadShell({
         activeViewportTurnByChatIdRef.current.set(chatId, submitted.turnId);
         setSubmittedViewportTurnId(submitted.turnId);
       }
-      return submitted !== null;
+      return submitted?.delivery ? submitted.delivery.then(() => true) : submitted !== null;
     },
     [chatId, send, withWorkspaceScope],
   );
@@ -1736,6 +1886,9 @@ export function ThreadShell({
           disabled={!chatId}
           inputAriaLabel={composerInputAriaLabel}
           isStreaming={turnActive}
+          activeTurnId={turnActive && chatId ? client.getRunTurnId(chatId) ?? historyActiveTurnId : null}
+          completedTurnIds={messagesReady && !recoveryNeedsDecision
+            && chatId && !client.hasUnsettledRun(chatId) ? queueCompletedTurnIds : undefined}
           placeholder={
             composerVariant === "hero"
               ? t("thread.composer.placeholderHero")
@@ -1763,15 +1916,17 @@ export function ThreadShell({
           onStop={stop}
           onTranscribeAudio={transcribeAudio}
           goalState={currentGoalState}
+          onFavoriteWorkspaceProject={favoriteWorkspaceProject}
+          onResolveWorkspaceProject={resolveWorkspaceProject}
+          onLoadWorkspaceProjects={loadWorkspaceProjects}
+          workspacePickerLayoutAnchor={conversationElement}
+          onBrowseWorkspaceDirectories={browseWorkspaceDirectories}
           workspaceScope={workspaceScope}
           workspaceControlsHidden={temporary}
           workspaceDefaultScope={workspaceDefaultScope}
           workspaceControls={workspaceControls}
           workspaceScopeDisabled={workspaceScopeDisabled}
           workspaceError={workspaceError}
-          onPickWorkspaceFolder={
-            workspaceControls?.can_pick_folder ? pickWorkspaceFolder : undefined
-          }
           onWorkspaceScopeChange={onWorkspaceScopeChange}
           pendingQueueKey={temporary ? null : chatId}
           transcriptionProvider={settingsSnapshot?.transcription?.provider}
@@ -1817,15 +1972,17 @@ export function ThreadShell({
           surfaceRef={composerSurfaceRef}
           onTranscribeAudio={transcribeAudio}
           goalState={currentGoalState}
+          onFavoriteWorkspaceProject={favoriteWorkspaceProject}
+          onResolveWorkspaceProject={resolveWorkspaceProject}
+          onLoadWorkspaceProjects={loadWorkspaceProjects}
+          workspacePickerLayoutAnchor={conversationElement}
+          onBrowseWorkspaceDirectories={browseWorkspaceDirectories}
           workspaceScope={workspaceScope}
           workspaceControlsHidden={temporary}
           workspaceDefaultScope={workspaceDefaultScope}
           workspaceControls={workspaceControls}
           workspaceScopeDisabled={workspaceScopeDisabled}
           workspaceError={workspaceError}
-          onPickWorkspaceFolder={
-            workspaceControls?.can_pick_folder ? pickWorkspaceFolder : undefined
-          }
           onWorkspaceScopeChange={onWorkspaceScopeChange}
           transcriptionProvider={settingsSnapshot?.transcription?.provider}
           ingressLimits={ingressLimits}
@@ -1879,8 +2036,14 @@ export function ThreadShell({
   ) : null;
 
   return (
+    <SubagentTasksProvider client={client} token={token}
+      sessionKey={session?.key ?? null}
+      liveEvents={webuiCapabilities.includes("webui.subagents.events.v1")}
+      historyEnabled={webuiCapabilities.includes("webui.subagents.history.v1")}
+      active={composerActive}
+      enabled={!temporary && !!session?.key.startsWith("websocket:") && webuiCapabilities.includes("webui.subagents.v1")}>
     <section ref={shellRef} data-preview-open={previewOpen || undefined} className="thread-preview-layout relative flex min-h-0 flex-1 overflow-hidden">
-      <div className={cn(
+      <div ref={setConversationElement} className={cn(
         "thread-conversation relative flex min-w-0 flex-1 flex-col overflow-hidden",
         headerPortalTarget === undefined && !hideHeader && "thread-workspace",
       )}>
@@ -1977,5 +2140,6 @@ export function ThreadShell({
         </FileActionsProvider>
       ) : null}
     </section>
+    </SubagentTasksProvider>
   );
 }

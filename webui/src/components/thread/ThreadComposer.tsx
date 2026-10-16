@@ -1,4 +1,31 @@
 import {
+  NewChatIcon,
+  CompactIcon,
+  StatusIcon,
+  ModelsIcon,
+  TriggerIcon,
+  DreamLogIcon,
+  PromptTemplateIcon,
+  PairingIcon,
+  ToolRunIcon,
+  ActivityIcon,
+  ArchiveIcon,
+  SkillsIcon,
+  MemoryIcon,
+  HelpIcon,
+  HistoryIcon,
+  ConversationIcon,
+  VoiceIcon,
+  AttachIcon,
+  RestartIcon,
+  RestrictedAccessIcon,
+  DreamIcon,
+  StopIcon,
+  EditIcon,
+  GoalIcon,
+  RestoreMemoryIcon,
+} from "@/components/icons/product-icons";
+import {
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -16,36 +43,20 @@ import {
   cliAppInitials,
   mcpPresetInitials,
   splitCapabilityMentionSegments,
-  type CapabilityMentionSegment,
 } from "@/components/CliAppMentionText";
+import type { CapabilityMentionSegment } from "@/lib/composer-mention-text";
 import { INLINE_TOKEN_HIGHLIGHT_COLOR } from "@/components/InlineTokenHighlight";
 import {
-  Activity,
-  Archive,
   ArrowUp,
-  BookOpen,
-  Brain,
   ChevronDown,
   ChevronUp,
-  CircleHelp,
   CornerDownRight,
   FileText,
   GripVertical,
-  History,
   ImageIcon,
   Loader2,
-  MessageCircle,
-  Mic,
-  Plus,
   Quote,
-  RotateCw,
-  Shield,
-  Sparkles,
-  Square,
-  SquarePen,
-  Target,
   Trash2,
-  Undo2,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -54,6 +65,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
   floatingItemClassName,
+  floatingItemFocusClassName,
   floatingSurfaceElevationClassName,
   floatingSurfaceVisualClassName,
 } from "@/components/ui/floating-surface";
@@ -64,7 +76,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
-  WorkspaceAccessMenu,
+  WorkspaceAccessToggle,
   WorkspaceProjectPicker,
 } from "@/components/thread/WorkspaceControls";
 import {
@@ -104,6 +116,8 @@ import type {
   WebUIIngressLimits,
   WorkspaceScopePayload,
   WorkspacesPayload,
+  ProjectDirectory,
+  WorkspaceDirectoriesPayload,
 } from "@/lib/types";
 import {
   logoFallbackUrls,
@@ -111,6 +125,7 @@ import {
 import { sessionHandleColor } from "@/lib/session-handle";
 import { requestSkillsRefresh } from "@/lib/skill-events";
 import {
+  isRegisteredSlashCommand,
   isSideChannelLifecycle,
   slashCommandLifecycle,
 } from "@/lib/slash-command";
@@ -199,6 +214,8 @@ interface ThreadComposerProps {
   inputAriaLabel?: string;
   compactWhenIdle?: boolean;
   isStreaming?: boolean;
+  activeTurnId?: string | null;
+  completedTurnIds?: readonly string[];
   modelLabel?: string | null;
   modelDetail?: string | null;
   modelPreset?: string | null;
@@ -225,11 +242,15 @@ interface ThreadComposerProps {
   goalState?: GoalStateWsPayload;
   workspaceScope?: WorkspaceScopePayload | null;
   workspaceControlsHidden?: boolean;
+  workspacePickerLayoutAnchor?: HTMLElement | null;
   workspaceDefaultScope?: WorkspaceScopePayload | null;
   workspaceControls?: WorkspacesPayload["controls"] | null;
   workspaceScopeDisabled?: boolean;
   workspaceError?: string | null;
-  onPickWorkspaceFolder?: () => Promise<string | null>;
+  onFavoriteWorkspaceProject?: (path: string, pinned: boolean) => Promise<ProjectDirectory[]>;
+  onResolveWorkspaceProject?: (path: string) => Promise<ProjectDirectory>;
+  onLoadWorkspaceProjects?: () => Promise<WorkspacesPayload>;
+  onBrowseWorkspaceDirectories?: (path: string, query: string, showHidden: boolean) => Promise<WorkspaceDirectoriesPayload>;
   onWorkspaceScopeChange?: (scope: WorkspaceScopePayload) => void;
   pendingQueueKey?: string | null;
   draftKey?: string;
@@ -243,18 +264,30 @@ interface ThreadComposerProps {
 }
 
 const COMMAND_ICONS: Record<string, LucideIcon> = {
-  activity: Activity,
-  archive: Archive,
-  "book-open": BookOpen,
-  brain: Brain,
-  "circle-help": CircleHelp,
-  history: History,
-  "rotate-cw": RotateCw,
-  shield: Shield,
-  sparkles: Sparkles,
-  square: Square,
-  "square-pen": SquarePen,
-  "undo-2": Undo2,
+  activity: ActivityIcon,
+  archive: ArchiveIcon,
+  "book-open": SkillsIcon,
+  brain: MemoryIcon,
+  "circle-help": HelpIcon,
+  history: HistoryIcon,
+  "rotate-cw": RestartIcon,
+  shield: RestrictedAccessIcon,
+  sparkles: DreamIcon,
+  square: StopIcon,
+  "square-pen": EditIcon,
+  "undo-2": RestoreMemoryIcon,
+  zap: TriggerIcon,
+  "file-text": PromptTemplateIcon,
+  wrench: ToolRunIcon,
+};
+
+const BUILTIN_COMMAND_ICONS: Record<string, LucideIcon> = {
+  "/new": NewChatIcon, "/compact": CompactIcon, "/stop": StopIcon,
+  "/restart": RestartIcon, "/status": StatusIcon, "/model": ModelsIcon,
+  "/history": HistoryIcon, "/goal": GoalIcon, "/trigger": TriggerIcon,
+  "/dream": DreamIcon, "/dream-log": DreamLogIcon, "/dream-restore": RestoreMemoryIcon,
+  "/dream-prompt": PromptTemplateIcon, "/evaluator-prompt": PromptTemplateIcon,
+  "/skill": SkillsIcon, "/help": HelpIcon, "/pairing": PairingIcon,
 };
 
 const SLASH_PALETTE_GAP_PX = 8;
@@ -264,6 +297,7 @@ const SLASH_PALETTE_CHROME_PX = 12;
 const SLASH_RECENTS_STORAGE_KEY = "nanobot.webui.slashCommandRecents";
 const SLASH_RECENTS_LIMIT = 5;
 const QUEUED_PROMPTS_STORAGE_PREFIX = "nanobot.webui.composerQueuedGuidance.v1:";
+const EMPTY_COMPLETED_TURN_IDS: readonly string[] = [];
 const QUEUED_PROMPTS_LIMIT = 20;
 const QUEUED_PROMPT_MAX_CHARS = 4000;
 const SESSION_MENTIONS_LIMIT = 8;
@@ -307,7 +341,7 @@ function VoiceRecordingMeter({
   );
 }
 
-type SlashPalettePlacement = "above" | "below";
+type SlashPalettePlacement = "above" | "below" | "beside";
 
 interface SlashPaletteLayout {
   placement: SlashPalettePlacement;
@@ -320,6 +354,16 @@ interface QueuedPrompt {
   images?: QueuedPromptImage[];
   quotedContext?: string;
   sessionMentions?: SessionMention[];
+  autoAfterTurnId?: string;
+  autoPaused?: boolean;
+}
+
+function pauseQueuedPrompt(prompt: QueuedPrompt): QueuedPrompt {
+  return { ...prompt, autoAfterTurnId: undefined, autoPaused: true };
+}
+
+function waitForNextQueuedTurn(prompt: QueuedPrompt): QueuedPrompt {
+  return { ...prompt, autoAfterTurnId: undefined, autoPaused: false };
 }
 
 interface QueuedPromptImage {
@@ -507,6 +551,10 @@ function normalizeQueuedPrompt(item: unknown, index: number): QueuedPrompt | nul
     ...(images.length > 0 ? { images } : {}),
     ...(quotedContext ? { quotedContext } : {}),
     ...(sessionMentions.length > 0 ? { sessionMentions } : {}),
+    ...(typeof record.autoAfterTurnId === "string" && record.autoAfterTurnId.trim()
+      ? { autoAfterTurnId: record.autoAfterTurnId.trim() }
+      : {}),
+    ...(record.autoPaused === true ? { autoPaused: true } : {}),
   };
 }
 
@@ -543,6 +591,8 @@ function storeQueuedPrompts(storageKey: string, prompts: QueuedPrompt[]): void {
           ...(prompt.sessionMentions?.length
             ? { sessionMentions: prompt.sessionMentions.slice(0, SESSION_MENTIONS_LIMIT) }
             : {}),
+          ...(prompt.autoAfterTurnId ? { autoAfterTurnId: prompt.autoAfterTurnId } : {}),
+          ...(prompt.autoPaused ? { autoPaused: true } : {}),
         })),
       ),
     );
@@ -614,7 +664,13 @@ function visualViewportBounds(): { top: number; bottom: number; height: number }
 }
 
 function getVisibleBounds(el: HTMLElement): { top: number; bottom: number } {
-  const viewport = visualViewportBounds();
+  // The app already follows the visual viewport on touch browsers. Measure
+  // its frame in the same coordinates as the composer, not WebKit's pan offset.
+  // During pinch zoom the app stops fitting, so use the zoomed viewport again.
+  const fittedRoot = window.visualViewport?.scale === 1
+    ? el.closest("#root.visual-viewport")
+    : null;
+  const viewport = fittedRoot?.getBoundingClientRect() ?? visualViewportBounds();
   let top = viewport.top;
   let bottom = viewport.bottom;
   let parent = el.parentElement;
@@ -834,7 +890,7 @@ function GoalStateStrip({
               type="button"
               className={cn(
                 "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-                "text-muted-foreground transition-colors hover:bg-muted/65 hover:text-foreground",
+                "text-muted-foreground transition-colors hover:text-foreground",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               )}
               aria-label={t("thread.composer.goalStateCloseAria")}
@@ -860,7 +916,7 @@ function GoalStateStrip({
             role="status"
             aria-label={ariaLabel}
           >
-            <Target className="h-4 w-4 shrink-0 text-primary/75" aria-hidden />
+            <GoalIcon className="h-4 w-4 shrink-0 text-primary/75" aria-hidden />
             <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-foreground/75">
               {displayStripLabel ? (
                 <span className="truncate">
@@ -874,7 +930,7 @@ function GoalStateStrip({
                 type="button"
                 className={cn(
                   "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
-                  "text-muted-foreground transition-colors hover:bg-muted/55 hover:text-foreground",
+                  "text-muted-foreground transition-colors hover:text-foreground",
                   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 )}
                 aria-expanded={goalPanelOpen}
@@ -904,6 +960,8 @@ export function ThreadComposer({
   inputAriaLabel,
   compactWhenIdle = false,
   isStreaming = false,
+  activeTurnId = null,
+  completedTurnIds = EMPTY_COMPLETED_TURN_IDS,
   modelLabel = null,
   modelDetail = null,
   modelPreset = null,
@@ -929,11 +987,15 @@ export function ThreadComposer({
   goalState,
   workspaceScope = null,
   workspaceControlsHidden = false,
+  workspacePickerLayoutAnchor,
   workspaceDefaultScope = null,
   workspaceControls = null,
   workspaceScopeDisabled = false,
   workspaceError = null,
-  onPickWorkspaceFolder,
+  onLoadWorkspaceProjects,
+  onResolveWorkspaceProject,
+  onFavoriteWorkspaceProject,
+  onBrowseWorkspaceDirectories,
   onWorkspaceScopeChange,
   pendingQueueKey = null,
   draftKey,
@@ -971,6 +1033,9 @@ export function ThreadComposer({
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readSlashRecents());
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const hasTouchPrimaryPointer = useMediaQuery("(hover: none) and (pointer: coarse)");
+  // Coarser than hasTouchPrimaryPointer on purpose: tablets with a physical
+  // keyboard still get the newline-on-Enter behavior.
+  const hasCoarsePointer = useMediaQuery("(pointer: coarse)");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionOverlayRef = useRef<HTMLDivElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -1008,7 +1073,6 @@ export function ThreadComposer({
   const draggedQueuedPromptIdRef = useRef<string | null>(null);
   const previousPendingQueueKeyRef = useRef(pendingQueueKey);
   const previousQueueRunRef = useRef({ key: pendingQueueKey, isStreaming });
-  const skipNextQueuedFlushRef = useRef(false);
   const skipQueuedPromptPersistRef = useRef(false);
   const voiceShortcutDownRef = useRef(false);
   const voiceErrorFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1022,6 +1086,10 @@ export function ThreadComposer({
     isHero
     && !!workspaceDefaultScope
     && !!onWorkspaceScopeChange
+    && !!onLoadWorkspaceProjects
+    && !!onBrowseWorkspaceDirectories
+    && !!onResolveWorkspaceProject
+    && !!onFavoriteWorkspaceProject
     && workspaceControls?.can_change_project !== false;
   const showProjectPicker = projectPickerAvailable && !workspaceControlsHidden;
 
@@ -1030,6 +1098,20 @@ export function ThreadComposer({
     skipQueuedPromptPersistRef.current = true;
     setQueuedPrompts(queuedPromptStorageKey ? readQueuedPrompts(queuedPromptStorageKey) : []);
   }, [pendingQueueKey, queuedPromptStorageKey]);
+
+  useEffect(() => {
+    if (!isStreaming || !activeTurnId) return;
+    // The next lifecycle owner, not a guidance input, releases the remaining queue.
+    setQueuedPrompts((items) => {
+      let changed = false;
+      const next = items.map((item) => {
+        if (item.autoPaused || item.autoAfterTurnId === activeTurnId) return item;
+        changed = true;
+        return { ...item, autoAfterTurnId: activeTurnId };
+      });
+      return changed ? next : items;
+    });
+  }, [activeTurnId, isStreaming, pendingQueueKey]);
 
   useEffect(() => {
     if (!queuedPromptStorageKey) return;
@@ -1067,11 +1149,9 @@ export function ThreadComposer({
           ? "Empty files cannot be attached"
           : reason === "total_too_large"
             ? "Attachments are too large together — remove some or use smaller files"
-            : reason === "transport_too_large"
-              ? "This attachment would exceed the gateway transport limit"
-              : reason === "too_large"
-                ? "File is too large"
-                : "Unsupported file type";
+            : reason === "too_large"
+              ? "File is too large"
+              : "Unsupported file type";
       return t(key, { max: maxAttachments, defaultValue: fallback });
     },
     [maxAttachments, t],
@@ -1155,7 +1235,10 @@ export function ThreadComposer({
     && !encoding
     && !hasErrors
     && hasComposerContent
-    && !value.trimStart().startsWith("/");
+    // Without command metadata, let the gateway classify slash input immediately.
+    && (slashCommands.length > 0
+      ? !isRegisteredSlashCommand(value, slashCommands)
+      : !value.trimStart().startsWith("/"));
 
   const slashQuery = useMemo(() => {
     if (interactionDisabled || slashMenuDismissed || !value.startsWith("/")) return null;
@@ -1544,11 +1627,18 @@ export function ThreadComposer({
       const bounds = getVisibleBounds(form);
       const spaceAbove = Math.max(0, rect.top - bounds.top - SLASH_PALETTE_GAP_PX);
       const spaceBelow = Math.max(0, bounds.bottom - rect.bottom - SLASH_PALETTE_GAP_PX);
+      // A landscape keyboard can leave less height than one input and option.
+      // Use the available width instead of clipping an absolute menu in the
+      // short viewport's scrollable composer footer.
+      const beside = rect.width >= 640
+        && !!form.closest("#root.short-visual-viewport");
       const placement: SlashPalettePlacement =
-        spaceAbove >= SLASH_PALETTE_MIN_HEIGHT_PX || spaceAbove >= spaceBelow
+        beside ? "beside" : spaceAbove >= SLASH_PALETTE_MIN_HEIGHT_PX || spaceAbove >= spaceBelow
           ? "above"
           : "below";
-      const available = placement === "above" ? spaceAbove : spaceBelow;
+      const available = beside
+        ? Math.max(0, bounds.bottom - bounds.top)
+        : placement === "above" ? spaceAbove : spaceBelow;
       const maxHeight = Math.min(SLASH_PALETTE_MAX_HEIGHT_PX, available);
 
       setSlashPaletteLayout((current) =>
@@ -1564,7 +1654,10 @@ export function ThreadComposer({
     viewport?.addEventListener("scroll", updateLayout);
     window.addEventListener("resize", updateLayout);
     document.addEventListener("scroll", updateLayout, true);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateLayout);
+    if (formRef.current) observer?.observe(formRef.current);
     return () => {
+      observer?.disconnect();
       viewport?.removeEventListener("resize", updateLayout);
       viewport?.removeEventListener("scroll", updateLayout);
       window.removeEventListener("resize", updateLayout);
@@ -1692,10 +1785,18 @@ export function ThreadComposer({
     };
   }, [onTranscribeAudio, voiceRecorder.beginShortcutHold, voiceRecorder.endShortcutHold]);
 
+  const handleStop = useCallback(() => {
+    secondEnterPromptIdRef.current = null;
+    if (queuedPrompts.length > 0) {
+      setQueuedPrompts((items) => items.map(pauseQueuedPrompt));
+    }
+    onStop?.();
+  }, [onStop, queuedPrompts.length]);
+
   const chooseSlashCommand = useCallback(
     (command: SlashPaletteCommand) => {
       if (command.command === "/stop" && isStreaming && onStop) {
-        onStop();
+        handleStop();
         setValue("");
         setSlashMenuDismissed(true);
         setCliAppMenuDismissed(false);
@@ -1725,7 +1826,7 @@ export function ThreadComposer({
       setInlineError(null);
       resizeTextarea();
     },
-    [isStreaming, onStop, recentSlashCommands, replaceMentionInput, resizeTextarea, skillQuery, value],
+    [handleStop, isStreaming, onStop, recentSlashCommands, replaceMentionInput, resizeTextarea, skillQuery, value],
   );
 
   const insertMentionCandidate = useCallback(
@@ -1863,6 +1964,7 @@ export function ThreadComposer({
       {
         id,
         text,
+        ...(activeTurnId ? { autoAfterTurnId: activeTurnId } : {}),
         ...(queuedImages.length > 0 ? { images: queuedImages } : {}),
         ...(normalizedQuotedContext ? { quotedContext: normalizedQuotedContext } : {}),
         ...(activeSessionMentions.length > 0
@@ -1875,6 +1977,7 @@ export function ThreadComposer({
     onQuotedContextChange?.(null);
   }, [
     activeSessionMentions,
+    activeTurnId,
     canQueueGuidance,
     clear,
     clearComposerText,
@@ -1923,12 +2026,26 @@ export function ThreadComposer({
     });
   }, []);
 
+  const observeQueuedSend = useCallback((prompt: QueuedPrompt, result: void | boolean | Promise<void | boolean>) => {
+    const restore = (error?: unknown) => {
+      setQueuedPrompts((items) => (items.some((item) => item.id === prompt.id)
+        ? items
+        : [prompt, ...items]).map(pauseQueuedPrompt));
+      setInlineError(error instanceof Error ? error.message : "Message not sent; queued draft retained");
+    };
+    if (result instanceof Promise) void result.then((accepted) => { if (accepted === false) restore(); }).catch(restore);
+    else if (result === false) restore();
+  }, []);
+
   const sendQueuedPrompt = useCallback(
     (prompt: QueuedPrompt) => {
       secondEnterPromptIdRef.current = null;
       const text = prompt.text.trim();
       const queuedImages = queuedImagesToSendImages(prompt.images);
-      setQueuedPrompts((items) => items.filter((item) => item.id !== prompt.id));
+      setQueuedPrompts((items) => {
+        const remaining = items.filter((item) => item.id !== prompt.id);
+        return isStreaming ? remaining : remaining.map(waitForNextQueuedTurn);
+      });
       if (text || queuedImages?.length) {
         const options: SendOptions | undefined = (
           prompt.quotedContext
@@ -1943,11 +2060,11 @@ export function ThreadComposer({
               ...(isStreaming ? { continueActiveTurn: true } : {}),
             }
           : undefined;
-        onSend(text, queuedImages, options);
+        observeQueuedSend(prompt, onSend(text, queuedImages, options));
       }
       requestAnimationFrame(() => textareaRef.current?.focus());
     },
-    [isStreaming, onSend],
+    [isStreaming, onSend, observeQueuedSend],
   );
 
   const sendNextQueuedPrompt = useCallback(() => {
@@ -1957,7 +2074,7 @@ export function ThreadComposer({
       setQueuedPrompts([]);
       return;
     }
-    setQueuedPrompts((items) => items.filter((item) => item.id !== nextPrompt.id));
+    setQueuedPrompts((items) => items.filter((item) => item.id !== nextPrompt.id).map(waitForNextQueuedTurn));
     const queuedImages = queuedImagesToSendImages(nextPrompt.images);
     const options: SendOptions | undefined = (
       nextPrompt.quotedContext || nextPrompt.sessionMentions?.length
@@ -1969,37 +2086,29 @@ export function ThreadComposer({
             : {}),
         }
       : undefined;
-    if (queuedImages?.length && options) onSend(nextPrompt.text.trim(), queuedImages, options);
-    else if (queuedImages?.length) onSend(nextPrompt.text.trim(), queuedImages);
-    else if (options) onSend(nextPrompt.text.trim(), undefined, options);
-    else onSend(nextPrompt.text.trim());
+    const result = queuedImages?.length && options ? onSend(nextPrompt.text.trim(), queuedImages, options)
+      : queuedImages?.length ? onSend(nextPrompt.text.trim(), queuedImages)
+      : options ? onSend(nextPrompt.text.trim(), undefined, options)
+      : onSend(nextPrompt.text.trim());
+    observeQueuedSend(nextPrompt, result);
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [onSend, queuedPrompts]);
+  }, [onSend, queuedPrompts, observeQueuedSend]);
 
   useEffect(() => {
     const previous = previousQueueRunRef.current;
     previousQueueRunRef.current = { key: pendingQueueKey, isStreaming };
     if (!isStreaming) secondEnterPromptIdRef.current = null;
     // Switching to an idle session is not completion of the previous session's run.
-    if (previous.key !== pendingQueueKey) {
-      skipNextQueuedFlushRef.current = false;
-      return;
-    }
-    if (!previous.isStreaming || isStreaming || queuedPrompts.length === 0) return;
-    if (skipNextQueuedFlushRef.current) {
-      skipNextQueuedFlushRef.current = false;
-      return;
-    }
+    if (previous.key !== pendingQueueKey) return;
+    if (isStreaming || interactionDisabled || queuedPrompts.length === 0) return;
+    const first = queuedPrompts[0];
+    if (first.autoPaused) return;
+    const waitingTurnCompleted = queuedPromptStorageKey !== null && first.autoAfterTurnId !== undefined
+      ? completedTurnIds.includes(first.autoAfterTurnId)
+      : previous.isStreaming;
+    if (!waitingTurnCompleted) return;
     sendNextQueuedPrompt();
-  }, [sendNextQueuedPrompt, isStreaming, pendingQueueKey, queuedPrompts.length]);
-
-  const handleStop = useCallback(() => {
-    secondEnterPromptIdRef.current = null;
-    if (queuedPrompts.length > 0) {
-      skipNextQueuedFlushRef.current = true;
-    }
-    onStop?.();
-  }, [onStop, queuedPrompts.length]);
+  }, [completedTurnIds, interactionDisabled, sendNextQueuedPrompt, isStreaming, pendingQueueKey, queuedPrompts, queuedPromptStorageKey]);
 
   const submit = useCallback(() => {
     if (modelNeedsSetup) {
@@ -2015,10 +2124,8 @@ export function ThreadComposer({
       setInlineError(textTooLargeMessage());
       return;
     }
-    // Share the same ``data:`` URL with both the wire payload and the
-    // optimistic bubble preview: data URLs are self-contained (no blob
-    // lifetime, safe under React StrictMode double-mount) and keep the bubble
-    // in sync with whatever the backend actually sees.
+    // Keep self-contained local previews across drafts and optimistic bubbles.
+    // The client decodes these to HTTP binary; WS messages contain only refs.
     const payload: SendAttachment[] | undefined =
       readyImages.length > 0
         ? readyImages.map((img) => ({
@@ -2074,7 +2181,8 @@ export function ThreadComposer({
       if (draftKey && draftStore && draftStore.get(draftKey) !== submittedDraft) return;
       if (draftKey) draftStore?.delete(draftKey);
       if (hasTouchPrimaryPointer) textareaRef.current?.blur();
-      setQueuedPrompts([]);
+      // Sending new guidance must not discard other messages still waiting.
+      if (!isStreaming || finalizeActiveTurn) setQueuedPrompts([]);
       // Bubble owns the data URL copy; safe to revoke every staged blob
       // preview here without affecting the rendered message.
       clear();
@@ -2090,7 +2198,7 @@ export function ThreadComposer({
             sideChannel: true,
             ...(finalizeActiveTurn ? { finalizeActiveTurn } : {}),
           }
-        : options,
+        : isStreaming ? { ...options, continueActiveTurn: true } : options,
     );
     if (result instanceof Promise) {
       setSendPending(true);
@@ -2099,7 +2207,7 @@ export function ThreadComposer({
           if (accepted !== false) finishSend();
         })
         .catch((error: unknown) => {
-          console.error("Failed to send message", error);
+          setInlineError(error instanceof Error ? error.message : "Failed to send message");
         })
         .finally(() => setSendPending(false));
       return;
@@ -2181,6 +2289,19 @@ export function ThreadComposer({
         return;
       }
     }
+    // Touch keyboards: a plain Enter inserts a newline; sending stays on the
+    // send button. The select-on-Enter menu branches above take precedence.
+    if (
+      e.key === "Enter"
+      && !e.shiftKey
+      && !e.altKey
+      && !e.ctrlKey
+      && !e.metaKey
+      && !e.nativeEvent.isComposing
+      && hasCoarsePointer
+    ) {
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       if (canQueueGuidance) {
@@ -2252,7 +2373,10 @@ export function ThreadComposer({
   );
 
   const attachButtonDisabled = interactionDisabled || full;
-  const showVoiceButton = Boolean(onTranscribeAudio);
+  const showVoiceButton = Boolean(onTranscribeAudio) && (
+    voiceRecorder.state !== "idle"
+    || (!hasComposerContent && images.length === 0 && !isStreaming && !modelNeedsSetup)
+  );
   const voiceRecordingStatusLabel = t("thread.composer.voice.recordingStatus", {
     time: voiceRecorder.elapsedLabel,
     defaultValue: `Recording ${voiceRecorder.elapsedLabel}`,
@@ -2269,7 +2393,8 @@ export function ThreadComposer({
       : voiceRecorder.state === "transcribing"
         ? t("thread.composer.voice.transcribing")
         : t("thread.composer.voice.hint");
-  const showStopButton = isStreaming && !!onStop;
+  // Touch users need an explicit send action; keep Stop while sending is unavailable.
+  const showStopButton = isStreaming && !!onStop && !canSend;
   const relaxedHeroInput = isHero && images.length === 0 && !isStreaming;
   const compactIdle = compactWhenIdle && !compactControls && !isHero && !composerFocused
     && value.length === 0 && images.length === 0 && !inlineError
@@ -2297,11 +2422,26 @@ export function ThreadComposer({
     return () => observer?.disconnect();
   }, [compactControls, compactWhenIdle, modelLabel, voiceRecorder.isRecording, workspaceScope]);
   const accessControl = workspaceScope && !workspaceControlsHidden ? (
-    <WorkspaceAccessMenu
+    <WorkspaceAccessToggle
       scope={workspaceScope}
       disabled={interactionDisabled || workspaceScopeDisabled}
-      canUseFullAccess={workspaceControls?.can_use_full_access !== false}
       isHero={isHero}
+      onChange={onWorkspaceScopeChange}
+    />
+  ) : null;
+  const workspaceControl = showProjectPicker ? (
+    <WorkspaceProjectPicker
+      layoutAnchor={workspacePickerLayoutAnchor}
+      isHero={isHero}
+      disabled={interactionDisabled || workspaceScopeDisabled}
+      scope={workspaceScope}
+      defaultScope={workspaceDefaultScope}
+      controls={workspaceControls}
+      error={workspaceError}
+      onFavoriteProject={onFavoriteWorkspaceProject}
+      onResolveProject={onResolveWorkspaceProject}
+      onLoadProjects={onLoadWorkspaceProjects}
+      onBrowseDirectories={onBrowseWorkspaceDirectories}
       onChange={onWorkspaceScopeChange}
     />
   ) : null;
@@ -2336,11 +2476,13 @@ export function ThreadComposer({
           )
         : "min-h-[50px] px-3.5 pb-1.5 pt-3 text-[16px] leading-5 sm:px-4",
   );
+  const paletteBeside = showAnyPalette && slashPaletteLayout.placement === "beside";
 
   return (
     <form
       ref={formRef}
       data-compact-controls={compactControls ? "true" : undefined}
+      data-palette-beside={paletteBeside || undefined}
       onFocusCapture={() => {
         if (!compactWhenIdle) return;
         // Portaled model controls belong to this composer too: keep its layout
@@ -2382,6 +2524,7 @@ export function ThreadComposer({
         "relative w-full",
         isHero ? "px-0" : "px-1 pb-1.5 pt-1 sm:px-0",
         compactWhenIdle && "thread-composer-collapsible-layout",
+        paletteBeside && "grid grid-cols-2 items-start gap-2 p-0",
       )}
     >
       {showSlashMenu ? (
@@ -2407,8 +2550,10 @@ export function ThreadComposer({
       <div
         ref={surfaceRef}
         data-compact={compactIdle || undefined}
+        style={paletteBeside ? { maxHeight: slashPaletteLayout.maxHeight, overflowY: "auto" } : undefined}
         className={cn(
           "thread-composer-surface group/composer relative mx-auto flex w-full flex-col overflow-visible transition-all duration-200",
+          paletteBeside && "col-start-1 row-start-1",
           isHero
             ? "max-w-[58rem] rounded-prominent bg-muted/80 focus-within:bg-muted dark:bg-card dark:focus-within:bg-white/[0.06]"
             : "max-w-[49.5rem] rounded-panel bg-muted/80 focus-within:bg-muted dark:bg-card dark:focus-within:bg-white/[0.06]",
@@ -2484,7 +2629,7 @@ export function ThreadComposer({
             </p>
             <button
               type="button"
-              className="touch-target -mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="touch-target -mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label={t("thread.composer.removeQuotedContext")}
               onClick={() => {
                 onQuotedContextChange?.(null);
@@ -2533,12 +2678,13 @@ export function ThreadComposer({
             }}
             onPaste={onPaste}
             rows={1}
+            enterKeyHint={hasCoarsePointer ? "enter" : undefined}
             placeholder={sessionDragPreview ? "" : resolvedPlaceholder}
             disabled={interactionDisabled}
             aria-label={inputAriaLabel ?? t("thread.composer.inputAria")}
             className={cn(
               inputTextClasses,
-              "relative z-10 block caret-foreground placeholder:text-muted-foreground/70",
+              "relative z-10 block caret-foreground placeholder:text-muted-foreground",
               "focus:outline-none focus-visible:outline-none",
               "disabled:cursor-not-allowed",
               hasMentionDecorations && "text-transparent selection:bg-primary/20",
@@ -2563,7 +2709,7 @@ export function ThreadComposer({
             isHero
               ? cn(
                   "gap-x-1.5 px-3 sm:px-4",
-                  showProjectPicker ? "pb-1.5" : "pb-3.5",
+                  showProjectPicker && compactControls ? "pb-1.5" : "pb-3.5",
                 )
               : "gap-x-2 px-2.5 pb-2 sm:px-3",
           )}
@@ -2585,18 +2731,18 @@ export function ThreadComposer({
             <Button
               type="button"
               size="icon"
-              variant="ghost"
+              variant="icon"
               disabled={attachButtonDisabled}
               aria-label={t("thread.composer.attachImage")}
               onClick={() => fileInputRef.current?.click()}
               className={cn(
-                "thread-composer-action thread-composer-round-action touch-target rounded-full text-muted-foreground hover:text-foreground",
+                "thread-composer-action thread-composer-round-action touch-target shrink-0 rounded-xl text-muted-foreground hover:text-foreground",
                 isHero
-                  ? "h-8 w-8 border border-border/55 bg-card shadow-[0_2px_8px_rgba(15,23,42,0.05)] hover:bg-card"
-                  : "h-9 w-9 border border-border/55 bg-card shadow-[0_2px_8px_rgba(15,23,42,0.05)] hover:bg-card",
+                  ? "h-8 w-8"
+                  : "h-9 w-9",
               )}
             >
-              <Plus className={cn(isHero ? "h-[18px] w-[18px]" : "h-4 w-4")} />
+              <AttachIcon className="h-3.5 w-3.5" />
             </Button>
             {voiceRecorder.isRecording ? (
               <VoiceRecordingMeter
@@ -2606,7 +2752,12 @@ export function ThreadComposer({
                 isHero={isHero}
                 levels={voiceRecorder.levels}
               />
-            ) : compactControls ? modelControl : accessControl}
+            ) : compactControls ? modelControl : (
+              <div className="thread-composer-workspace-group flex min-w-0 items-center gap-0.5">
+                {workspaceControl}
+                {accessControl}
+              </div>
+            )}
           </div>
           <div
             className={cn(
@@ -2616,38 +2767,61 @@ export function ThreadComposer({
           >
             {!compactControls ? modelControl : null}
             {!compactControls ? usageControl : null}
-            {showVoiceButton ? (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      disabled={voiceRecorder.buttonDisabled}
-                      aria-label={voiceButtonLabel}
-                      aria-keyshortcuts={VOICE_SHORTCUT_ARIA}
-                      title={voiceButtonTooltip}
-                      onPointerDown={voiceRecorder.beginPress}
-                      onPointerUp={voiceRecorder.endPress}
-                      onPointerCancel={voiceRecorder.endPress}
-                      onClick={voiceRecorder.handleClick}
-                      className={cn(
-                        "thread-composer-action touch-target rounded-full border border-transparent text-muted-foreground hover:bg-muted/65 hover:text-foreground",
-                        isHero ? "h-8 w-8" : "h-9 w-9",
-                        voiceRecorder.isRecording &&
-                          "bg-red-500 text-white shadow-[0_8px_20px_rgba(239,68,68,0.22)] hover:bg-red-500 hover:text-white",
-                      )}
-                    >
-                      {voiceRecorder.state === "transcribing" ? (
-                        <Loader2 className={cn(isHero ? "h-4 w-4" : "h-4 w-4", "animate-spin")} />
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type={showVoiceButton || showStopButton || modelNeedsSetup ? "button" : "submit"}
+                    size="icon"
+                    disabled={showVoiceButton ? voiceRecorder.buttonDisabled : showStopButton ? interactionDisabled : !canSend && !canOpenModelSettings}
+                    aria-label={
+                      showVoiceButton
+                        ? voiceButtonLabel
+                        : showStopButton
+                          ? t("thread.composer.stop")
+                          : modelNeedsSetup
+                            ? t("thread.composer.configureModel", { defaultValue: "Configure model" })
+                            : t("thread.composer.send")
+                    }
+                    aria-keyshortcuts={showVoiceButton ? VOICE_SHORTCUT_ARIA : undefined}
+                    onPointerDown={showVoiceButton ? voiceRecorder.beginPress : undefined}
+                    onPointerUp={showVoiceButton ? voiceRecorder.endPress : undefined}
+                    onPointerCancel={showVoiceButton ? voiceRecorder.endPress : undefined}
+                    onClickCapture={event => {
+                      if (!voiceRecorder.consumeSuppressedClick()) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    onClick={showVoiceButton ? voiceRecorder.handleClick : showStopButton ? handleStop : modelNeedsSetup ? onModelBadgeClick : undefined}
+                    className={cn(
+                      "thread-composer-action thread-composer-round-action touch-target rounded-full",
+                      showStopButton && !showVoiceButton
+                        ? "border border-border/70 bg-card text-foreground/85 hover:text-foreground disabled:text-muted-foreground/50"
+                        : "border border-foreground bg-foreground text-background disabled:border-foreground disabled:bg-foreground disabled:text-background",
+                      showVoiceButton && voiceRecorder.isRecording && "border-red-500 bg-red-500 text-white hover:bg-red-500 hover:text-white",
+                      isHero ? "h-8 w-8" : "h-9 w-9",
+                    )}
+                  >
+                    {showVoiceButton ? (
+                      voiceRecorder.state === "transcribing" ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
                       ) : voiceRecorder.isRecording ? (
-                        <Square className={cn(isHero ? "h-3.5 w-3.5" : "h-3.5 w-3.5")} fill="currentColor" />
+                        <StopIcon className="h-3.5 w-3.5" fill="currentColor" />
                       ) : (
-                        <Mic className={cn(isHero ? "h-4 w-4" : "h-4 w-4")} />
-                      )}
-                    </Button>
-                  </TooltipTrigger>
+                        <VoiceIcon className="h-4 w-4" />
+                      )
+                    ) : showStopButton ? (
+                      <StopIcon className={cn("fill-current stroke-current", isHero ? "h-3 w-3" : "h-3.5 w-3.5")} />
+                    ) : modelNeedsSetup ? (
+                      <ModelsIcon className="h-4 w-4" />
+                    ) : canSend || !isStreaming ? (
+                      <ArrowUp className="h-4 w-4" />
+                    ) : (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                {showVoiceButton ? (
                   <TooltipContent
                     side="top"
                     align="center"
@@ -2655,48 +2829,17 @@ export function ThreadComposer({
                   >
                     <span>{voiceButtonTooltip}</span>
                     {voiceRecorder.state === "idle" ? (
-                      <kbd className="rounded-full bg-muted px-2 py-0.5 font-sans text-[12px] font-semibold leading-none text-muted-foreground dark:bg-white/10 dark:text-white/80">
+                      <kbd className="rounded-full bg-muted px-2 py-0.5 font-sans text-[12px] font-semibold leading-none text-muted-foreground dark:bg-white/10">
                         {voiceShortcutLabel}
                       </kbd>
                     ) : null}
                   </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            ) : null}
-            <Button
-              type={showStopButton || modelNeedsSetup ? "button" : "submit"}
-              size="icon"
-              disabled={showStopButton ? interactionDisabled : !canSend && !canOpenModelSettings}
-              aria-label={
-                showStopButton
-                  ? t("thread.composer.stop")
-                  : modelNeedsSetup
-                    ? t("thread.composer.configureModel", { defaultValue: "Configure model" })
-                    : t("thread.composer.send")
-              }
-              onClick={showStopButton ? handleStop : modelNeedsSetup ? onModelBadgeClick : undefined}
-              className={cn(
-                "thread-composer-action thread-composer-round-action touch-target rounded-full transition-transform",
-                showStopButton
-                  ? "border border-border/70 bg-card text-foreground/85 shadow-[0_3px_10px_rgba(15,23,42,0.08)] hover:bg-muted/65 hover:text-foreground disabled:text-muted-foreground/50"
-                  : isHero
-                    ? "border border-foreground bg-foreground text-background shadow-[0_4px_12px_rgba(15,23,42,0.20)] hover:bg-foreground/90 disabled:border-foreground disabled:bg-foreground disabled:text-background"
-                    : "border border-foreground bg-foreground text-background shadow-[0_3px_10px_rgba(15,23,42,0.18)] hover:bg-foreground/90 disabled:border-foreground disabled:bg-foreground disabled:text-background",
-                isHero ? "h-8 w-8" : "h-9 w-9",
-                (canSend || canOpenModelSettings || showStopButton) && "hover:scale-[1.03] active:scale-95",
-              )}
-            >
-              {showStopButton ? (
-                <Square className={cn("fill-current stroke-current", isHero ? "h-3 w-3" : "h-3.5 w-3.5")} />
-              ) : isStreaming ? (
-                <Loader2 className={cn(isHero ? "h-4 w-4" : "h-4 w-4", "animate-spin")} />
-              ) : (
-                <ArrowUp className={cn(isHero ? "h-4 w-4" : "h-4 w-4")} />
-              )}
-            </Button>
+                ) : null}
+              </Tooltip>
+            </TooltipProvider>
           </div>
         </div>
-        {projectPickerAvailable ? (
+        {compactControls && projectPickerAvailable ? (
           <div
             className="inline-disclosure"
             data-composer-workspace-drawer=""
@@ -2704,25 +2847,17 @@ export function ThreadComposer({
             aria-hidden={showProjectPicker ? undefined : true}
           >
             <div className="inline-disclosure-clip">
-              <div className="inline-disclosure-content">
-                <WorkspaceProjectPicker
-                  isHero={isHero}
-                  disabled={interactionDisabled || workspaceScopeDisabled || !showProjectPicker}
-                  scope={workspaceScope}
-                  defaultScope={workspaceDefaultScope}
-                  controls={workspaceControls}
-                  error={workspaceError}
-                  onPickFolder={onPickWorkspaceFolder}
-                  onChange={onWorkspaceScopeChange}
-                />
+              <div className="inline-disclosure-content thread-composer-workspace-row flex min-w-0 items-center justify-between gap-2 rounded-b-[28px] bg-muted/45 px-3 py-1.5 dark:bg-white/[0.045] sm:px-4">
+                {workspaceControl}
+                <div className="ml-auto flex min-w-0 justify-end">{accessControl}</div>
               </div>
             </div>
           </div>
         ) : null}
       </div>
-      {compactControls ? (
-        <div className="thread-composer-meta mx-auto flex w-full max-w-[58rem] items-center justify-between gap-2 px-2">
-          {accessControl}
+      {compactControls && (!projectPickerAvailable || usageControl) ? (
+        <div className="thread-composer-meta mx-auto flex w-full max-w-[58rem] items-center justify-between gap-2 px-3">
+          {!projectPickerAvailable ? accessControl : null}
           <div className="ml-auto">{usageControl}</div>
         </div>
       ) : null}
@@ -2869,8 +3004,8 @@ function QueuedPromptRow({
         onDragEnd={onDragEnd}
         className={cn(
           "inline-flex h-7 w-7 shrink-0 cursor-grab items-center justify-center rounded-lg",
-          "text-muted-foreground/45 transition-colors hover:bg-background/80 hover:text-muted-foreground",
-          "active:cursor-grabbing dark:hover:bg-white/[0.06]",
+          "text-muted-foreground/45 transition-colors hover:text-muted-foreground",
+          "active:cursor-grabbing",
         )}
       >
         <GripVertical className="pointer-events-none h-3.5 w-3.5" aria-hidden />
@@ -2902,17 +3037,17 @@ function QueuedPromptRow({
         size="icon"
         aria-label={editLabel}
         title={editLabel}
-        className="h-7 w-7 shrink-0 rounded-full text-muted-foreground hover:bg-background/85 hover:text-foreground dark:hover:bg-white/[0.07]"
+        className="h-7 w-7 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
         onClick={() => onEdit(prompt)}
       >
-        <SquarePen className="h-3.5 w-3.5" aria-hidden />
+        <EditIcon className="h-3.5 w-3.5" aria-hidden />
       </Button>
       <Button
         type="button"
         variant="ghost"
         size="icon"
         aria-label={deleteLabel}
-        className="h-7 w-7 shrink-0 rounded-full text-muted-foreground hover:bg-background/85 hover:text-destructive dark:hover:bg-white/[0.07]"
+        className="h-7 w-7 shrink-0 rounded-full text-muted-foreground hover:text-destructive"
         onClick={() => onDelete(prompt.id)}
       >
         <Trash2 className="h-3 w-3" aria-hidden />
@@ -3047,8 +3182,11 @@ function CliAppMentionPalette({
       style={{ maxHeight: layout.maxHeight }}
       className={cn(
         floatingSurfaceVisualClassName,
-        "absolute left-1/2 z-30 w-[calc(100%-0.5rem)] -translate-x-1/2 overflow-hidden",
-        layout.placement === "above" ? "bottom-full mb-2" : "top-full mt-2",
+        "z-30 overflow-hidden",
+        layout.placement === "beside"
+          ? "relative col-start-2 row-start-1 w-full"
+          : cn("absolute left-1/2 w-[calc(100%-0.5rem)] -translate-x-1/2",
+            layout.placement === "above" ? "bottom-full mb-2" : "top-full mt-2"),
         isHero ? "max-w-[58rem]" : "max-w-[49.5rem]",
       )}
     >
@@ -3086,7 +3224,8 @@ function CliAppMentionPalette({
                   }}
                   className={cn(
                     floatingItemClassName,
-                    "flex min-h-10 w-full items-center gap-2.5 px-2.5 py-1.5 text-left transition-colors",
+                    floatingItemFocusClassName,
+                    "touch-target flex min-h-10 w-full items-center gap-2.5 px-2.5 py-1.5 text-left transition-colors",
                     selected
                       ? "bg-foreground/[0.055] text-foreground"
                       : "text-foreground/90 hover:bg-foreground/[0.04]",
@@ -3145,7 +3284,7 @@ function MentionCandidateLogo({
         className="flex h-5 w-5 shrink-0 items-center justify-center"
         style={{ color }}
       >
-        <MessageCircle className="h-4 w-4" aria-hidden />
+        <ConversationIcon className="h-4 w-4" aria-hidden />
       </span>
     );
   }
@@ -3200,14 +3339,17 @@ function SlashCommandPalette({
       style={{ maxHeight: layout.maxHeight }}
       className={cn(
         floatingSurfaceVisualClassName,
-        "absolute left-1/2 z-30 w-[calc(100%-0.5rem)] -translate-x-1/2 overflow-hidden",
-        layout.placement === "above" ? "bottom-full mb-2" : "top-full mt-2",
+        "z-30 overflow-hidden",
+        layout.placement === "beside"
+          ? "relative col-start-2 row-start-1 w-full"
+          : cn("absolute left-1/2 w-[calc(100%-0.5rem)] -translate-x-1/2",
+            layout.placement === "above" ? "bottom-full mb-2" : "top-full mt-2"),
         isHero ? "max-w-[58rem]" : "max-w-[49.5rem]",
       )}
     >
       <div ref={listRef} className="overflow-y-auto pr-0.5" style={{ maxHeight: listMaxHeight }}>
         {commands.map((command, index) => {
-          const Icon = COMMAND_ICONS[command.icon] ?? CircleHelp;
+          const Icon = command.kind === "skill" ? SkillsIcon : BUILTIN_COMMAND_ICONS[command.command] ?? COMMAND_ICONS[command.icon] ?? HelpIcon;
           const selected = index === selectedIndex;
           const isSkill = command.kind === "skill";
           const commandKey = slashCommandI18nKey(command.command);
@@ -3231,6 +3373,7 @@ function SlashCommandPalette({
               }}
               className={cn(
                 floatingItemClassName,
+                floatingItemFocusClassName,
                 "flex min-h-[44px] w-full items-center gap-3 px-3 py-2 text-left transition-colors",
                 selected
                   ? "bg-foreground/[0.065] text-foreground dark:bg-white/[0.09]"
@@ -3367,7 +3510,7 @@ function AttachmentChip({
         aria-label={labelRemove}
         className={cn(
           "ml-1 grid h-5 w-5 flex-none place-items-center rounded-full",
-          "text-muted-foreground/80 hover:bg-foreground/8 hover:text-foreground",
+          "text-muted-foreground/80 hover:text-foreground",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-foreground/30",
         )}
       >

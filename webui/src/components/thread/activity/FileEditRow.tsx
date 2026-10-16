@@ -155,6 +155,7 @@ function fileEditAction(
   const deleting = edit.operation === "delete";
   if (failed) return t(`message.agentActivity.${deleting ? "deleteFileFailed" : "editFileFailedShort"}`);
   if (editing) return t(`message.agentActivity.${deleting ? "deletingFile" : "editingFileShort"}`);
+  if (edit.operation === "create") return t("message.agentActivity.createdFile");
   return t(`message.agentActivity.${deleting ? "deletedFile" : "editedFileShort"}`);
 }
 
@@ -325,7 +326,7 @@ function FileUnifiedDiff({
           aria-hidden
         />
         <span className="min-w-0 flex-1">{viewDiffLabel}</span>
-        <span className="shrink-0 text-muted-foreground/65">{lineCountLabel}</span>
+        <span className="shrink-0 text-muted-foreground">{lineCountLabel}</span>
       </button>
       <DisclosureContent id={contentId} open={open} onExitComplete={releaseBody}>
         {shouldRenderBody ? renderBody() : null}

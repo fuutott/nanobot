@@ -10,6 +10,7 @@ import { ComposerDraftStore, clearStoredComposerDrafts } from "@/lib/composer-dr
 import { CLI_APPS_CHANGED_EVENT } from "@/lib/cli-app-events";
 import type { CanonicalRunSnapshot, StreamError } from "@/lib/nanobot-client";
 import { webuiThreadCache } from "@/lib/webui-thread-cache";
+import { ThreadMessageCache } from "@/lib/thread-message-cache";
 import { ClientProvider } from "@/providers/ClientProvider";
 import type {
   CliAppsPayload,
@@ -39,9 +40,11 @@ function makeClient() {
   >();
   const sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
   const runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
+  const runCompletionHandlers = new Set<(chatId: string) => void>();
   const runStartedAtByChatId = new Map<string, number>();
   const runGenerationByChatId = new Map<string, number>();
   const latestRunTurnIdByChatId = new Map<string, string>();
+  const closedRunTurnIdsByChatId = new Map<string, Set<string>>();
   const completedTurnIdsByChatId = new Map<string, Set<string>>();
   const goalStateByChatId = new Map<string, import("@/lib/types").GoalStateWsPayload>();
   let status: ConnectionStatus = "open";
@@ -73,7 +76,8 @@ function makeClient() {
       prospectiveFences.has(turnId)
       || existingFences?.has(turnId) === true
       || (
-        snapshot?.hasPendingToolCalls === false
+        snapshot?.completionIdsProvided !== true
+        && snapshot?.hasPendingToolCalls === false
         && observedTurnIds.has(turnId)
       )
     );
@@ -123,6 +127,10 @@ function makeClient() {
         runStatusHandlers.delete(handler);
       };
     },
+    onRunCompletion: (handler: (chatId: string) => void) => {
+      runCompletionHandlers.add(handler);
+      return () => { runCompletionHandlers.delete(handler); };
+    },
     onRuntimeModelUpdate: (
       handler: (modelName: string | null, modelPreset?: string | null) => void,
     ) => {
@@ -133,6 +141,10 @@ function makeClient() {
     },
     getRunStartedAt: (chatId: string) => runStartedAtByChatId.get(chatId) ?? null,
     getRunTurnId: (chatId: string) => latestRunTurnIdByChatId.get(chatId) ?? null,
+    isRunCompleted: (chatId: string, turnId: string) => (
+      closedRunTurnIdsByChatId.get(chatId)?.has(turnId) === true
+      || completedTurnIdsByChatId.get(chatId)?.has(turnId) === true
+    ),
     finishRunLocally: vi.fn((chatId: string) => {
       runStartedAtByChatId.delete(chatId);
       latestRunTurnIdByChatId.delete(chatId);
@@ -192,8 +204,14 @@ function makeClient() {
         (ev.event === "goal_status" && ev.status === "idle")
         || ev.event === "turn_end"
       ) {
+        if (turnId) {
+          const closed = closedRunTurnIdsByChatId.get(chatId) ?? new Set<string>();
+          closed.add(turnId);
+          closedRunTurnIdsByChatId.set(chatId, closed);
+        }
         runStartedAtByChatId.delete(chatId);
         for (const h of runStatusHandlers) h(chatId, null);
+        for (const h of runCompletionHandlers) h(chatId);
       }
       if (ev.event === "goal_state") {
         goalStateByChatId.set(chatId, ev.goal_state);
@@ -222,12 +240,14 @@ function wrap(
   children: ReactNode,
   modelName?: string | null,
   token = "tok",
+  webuiCapabilities: string[] = [],
 ) {
   return (
     <ClientProvider
       client={client as unknown as import("@/lib/nanobot-client").NanobotClient}
       token={token}
       modelName={modelName ?? null}
+      webuiCapabilities={webuiCapabilities}
     >
       {children}
     </ClientProvider>
@@ -491,6 +511,39 @@ describe("ThreadShell", () => {
     );
   });
 
+  it("renders one persisted task entry at the initiating prompt through the full shell", async () => {
+    const client = makeClient();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/subagents")) return httpJson({ tasks: [{
+        task_id: "completed-task", label: "Inspect settings", task_description: "Inspect settings",
+        origin_turn_id: "delegation-turn", origin_message_id: null, created_at: 100, completed_at: 102,
+        state: "done", phase: "done", elapsed_seconds: 2, iteration: 1, tool_events: [],
+        usage: null, receipts: {}, result: "Verified", partial: false, stop_reason: "completed", error: null,
+      }] });
+      if (String(input).includes("/webui-thread")) return httpJson(transcriptFromSimpleMessages([
+        { role: "user", content: "Delegate inspection", turnId: "delegation-turn" },
+        { role: "assistant", content: "Parent conclusion", turnId: "delegation-turn" },
+      ]));
+      return { ok: false, status: 404, json: async () => ({}) };
+    }));
+    const shell = () => wrap(client, <ThreadShell session={session("persisted-tasks")} title="Task history"
+      onToggleSidebar={() => {}} />, null, "tok", ["webui.core.v1", "webui.subagents.v1"]);
+    const view = render(shell());
+    await screen.findByText("Delegate inspection");
+    fireEvent.click(await screen.findByRole("button", { name: /Subtasks Finished: 1/ }));
+    const task = await screen.findByRole("button", { name: /Inspect settings Completed/ });
+    await screen.findByText("Delegate inspection");
+    expect(screen.getAllByRole("button", { name: /Inspect settings/ })).toHaveLength(1);
+    expect(screen.getByTestId("thread-message-region")).toContainElement(task);
+    expect(within(screen.getByTestId("thread-composer-motion")).queryByText("Inspect settings")).not.toBeInTheDocument();
+    view.unmount();
+    render(shell());
+    await screen.findByText("Delegate inspection");
+    fireEvent.click(await screen.findByRole("button", { name: /Subtasks Finished: 1/ }));
+    await screen.findByRole("button", { name: /Inspect settings Completed/ });
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("clears the welcome draft after a delayed new-chat send and an unchanged round-trip", async () => {
     const client = makeClient();
     const store = new ComposerDraftStore();
@@ -576,7 +629,7 @@ describe("ThreadShell", () => {
     const view = render(shell("draft-a"));
     expect(screen.getByRole("textbox")).toHaveValue("draft A");
     expect(screen.getByLabelText("Quoted context")).toHaveTextContent("quote A");
-    fireEvent.click(screen.getByRole("button", { name: "Remove quoted context" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove quote" }));
     view.rerender(shell("draft-b"));
     expect(screen.getByRole("textbox")).toHaveValue("draft B");
     expect(screen.getByLabelText("Quoted context")).toHaveTextContent("quote B");
@@ -1137,7 +1190,7 @@ describe("ThreadShell", () => {
     );
 
     fireEvent.focus(await screen.findByLabelText("fast"));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast · gpt-5.5 · OpenAI Codex");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast gpt-5.5 OpenAI Codex");
     fireEvent.blur(screen.getByLabelText("fast"));
     expect(screen.queryByLabelText("Default")).not.toBeInTheDocument();
   });
@@ -1164,9 +1217,9 @@ describe("ThreadShell", () => {
     );
 
     fireEvent.focus(await screen.findByLabelText("fast"));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast · gpt-5.5 · OpenAI Codex");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast gpt-5.5 OpenAI Codex");
     fireEvent.blur(screen.getByLabelText("fast"));
-    expect(screen.queryByRole("button", { name: "Choose your AI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Choose model" })).not.toBeInTheDocument();
   });
 
   it("switches through every named preset while preserving call-order priority", async () => {
@@ -1202,7 +1255,7 @@ describe("ThreadShell", () => {
       "preset-order",
       "/model fast",
     );
-    expect(await screen.findByText("fast")).toBeInTheDocument();
+    expect(await screen.findByLabelText("fast", { selector: "button" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "fast" }));
     fireEvent.click(await screen.findByRole("option", { name: /^extra\b/i }));
     expect(client.sendSystemCommand).toHaveBeenLastCalledWith(
@@ -1212,7 +1265,7 @@ describe("ThreadShell", () => {
     expect(await screen.findByText("extra")).toBeInTheDocument();
 
     rerender(view("fast"));
-    expect(await screen.findByText("fast")).toBeInTheDocument();
+    expect(await screen.findByLabelText("fast", { selector: "button" })).toBeInTheDocument();
   });
 
   it("uses the backend-resolved provider for an auto session preset", async () => {
@@ -1248,9 +1301,9 @@ describe("ThreadShell", () => {
     );
 
     fireEvent.focus(await screen.findByLabelText("fast"));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast · gpt-4 · Company Proxy");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast gpt-4 Company Proxy");
     fireEvent.blur(screen.getByLabelText("fast"));
-    expect(screen.queryByRole("button", { name: "Choose your AI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Choose model" })).not.toBeInTheDocument();
   });
 
   it("keeps the selected composer preset and attributes only the reply to its actual source", async () => {
@@ -1300,7 +1353,7 @@ describe("ThreadShell", () => {
     expect(configuredBadge).not.toHaveAttribute("data-fallback");
     fireEvent.focus(screen.getByLabelText("Default"));
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "Default · gpt-5.5 · OpenAI Codex",
+      "Default gpt-5.5 OpenAI Codex",
     );
     fireEvent.blur(screen.getByLabelText("Default"));
 
@@ -1415,7 +1468,7 @@ describe("ThreadShell", () => {
     expect(screen.queryByText(/This response used a fallback model/)).not.toBeInTheDocument();
   });
 
-  it.each([false, true])("hides unconfigured model details in setup tooltips (existing history: %s)", async (hasHistory) => {
+  it.each([false, true])("keeps model setup actionable without a repeated tooltip (existing history: %s)", async (hasHistory) => {
     const client = makeClient();
     const settings = modelSettings("anthropic/claude-opus-4-5", "anthropic");
     settings.agent.has_api_key = false;
@@ -1442,9 +1495,9 @@ describe("ThreadShell", () => {
     ));
 
     await screen.findByText(hasHistory ? "Previous message" : HERO_GREETING_PATTERN);
-    const badge = screen.getByRole("button", { name: "Choose your AI" });
+    const badge = screen.getByRole("button", { name: "Choose model" });
     fireEvent.focus(badge);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Choose your AI$/);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
     fireEvent.click(badge);
     expect(onOpenModelSettings).toHaveBeenCalledTimes(1);
     expect(client.sendMessage).not.toHaveBeenCalled();
@@ -1489,12 +1542,12 @@ describe("ThreadShell", () => {
       ),
     );
 
-    const badge = await screen.findByRole("button", { name: "Choose your AI" });
+    const badge = await screen.findByRole("button", { name: "Choose model" });
     expect(screen.queryByTestId("composer-model-setup-icon")).not.toBeInTheDocument();
     expect(badge.querySelector('[data-needs-setup="true"]')).toHaveClass(
       "composer-model-pill-setup",
     );
-    expect(screen.getByTestId("composer-model-setup-label")).toHaveTextContent("Choose your AI");
+    expect(screen.getByTestId("composer-model-setup-label")).toHaveTextContent("Choose model");
     expect(badge).not.toHaveClass("border-amber-500/35");
     expect(screen.queryByTestId("composer-model-logo-openai_codex")).not.toBeInTheDocument();
 
@@ -1504,7 +1557,7 @@ describe("ThreadShell", () => {
     });
     fireEvent.click(badge);
 
-    expect(screen.queryByRole("dialog", { name: "Choose your AI" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Choose model" })).not.toBeInTheDocument();
     expect(onOpenModelSettings).toHaveBeenCalledTimes(1);
     expect(input).toHaveValue("hello");
     expect(client.sendMessage).not.toHaveBeenCalled();
@@ -1550,7 +1603,7 @@ describe("ThreadShell", () => {
     );
 
     await screen.findByLabelText("Message input");
-    expect(screen.queryByRole("button", { name: "Toggle image generation mode" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Image mode" })).not.toBeInTheDocument();
 
     await act(async () => {
       rerender(
@@ -1567,7 +1620,7 @@ describe("ThreadShell", () => {
       );
     });
 
-    expect(screen.queryByRole("button", { name: "Toggle image generation mode" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Image mode" })).not.toBeInTheDocument();
   });
 
   it("restores in-memory messages when switching away and back to a session", async () => {
@@ -1628,6 +1681,102 @@ describe("ThreadShell", () => {
     });
 
     expect(screen.getByText("persist me across tabs")).toBeInTheDocument();
+  });
+
+  it.each([false, true])("drains persisted follow-ups before history refresh resolves (pending tools=%s)", async (pendingTools) => {
+    const client = makeClient();
+    const chatId = "queued-live-completion";
+    const owner = "queued-owner";
+    const initialHistory = httpJson({
+      ...transcriptFromSimpleMessages([{ role: "user", content: "Initial question", turnId: owner }]),
+      has_pending_tool_calls: pendingTools,
+      active_turn_id: owner,
+      completed_turn_ids: [],
+    });
+    vi.mocked(fetch).mockImplementation(async (input) => (
+      String(input).includes("/webui-thread") ? initialHistory
+        : { ok: false, status: 404, json: async () => ({}) }
+    ) as Response);
+    render(wrap(client, <ThreadShell session={session(chatId)} title="Queued chat" onToggleSidebar={() => {}} />));
+    await screen.findByText("Initial question");
+    act(() => client._emitChat(chatId, {
+      event: "goal_status", chat_id: chatId, turn_id: owner,
+      status: "running", started_at: 1_000,
+    }));
+    const input = screen.getByLabelText("Message input");
+    for (const text of ["first persisted follow-up", "second persisted follow-up"]) {
+      fireEvent.change(input, { target: { value: text } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    }
+    let finishRefresh!: (response: Response) => void;
+    const refresh = new Promise<Response>((resolve) => { finishRefresh = resolve; });
+    let refreshStarted = false;
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input).includes("/webui-thread")) {
+        refreshStarted = true;
+        return refresh;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+    act(() => client._emitSessionUpdate(chatId, "thread"));
+    await waitFor(() => expect(refreshStarted).toBe(true));
+    try {
+      act(() => client._emitChat(chatId, { event: "turn_end", chat_id: chatId, turn_id: owner }));
+      await waitFor(() => expectSendMessageWithTurn(client, chatId, "first persisted follow-up"));
+      expect(client.sendMessage).toHaveBeenCalledTimes(1);
+      const nextTurnId = client.sendMessage.mock.calls[0][3]!.turnId!;
+      act(() => client._emitChat(chatId, {
+        event: "goal_status", chat_id: chatId, turn_id: nextTurnId,
+        status: "running", started_at: 2_000,
+      }));
+      expect(client.sendMessage).toHaveBeenCalledTimes(1);
+      act(() => client._emitChat(chatId, { event: "turn_end", chat_id: chatId, turn_id: nextTurnId }));
+      await waitFor(() => expectSendMessageWithTurn(client, chatId, "second persisted follow-up"));
+      expect(client.sendMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => { finishRefresh(initialHistory as Response); });
+    }
+  });
+
+  it("drains temporary follow-ups once per live completed turn without persisted history", async () => {
+    const client = makeClient();
+    const chatId = "temporary-queued-follow-ups";
+    render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Temporary chat" temporary
+      temporaryChatIds={[chatId]} onToggleSidebar={() => {}}
+    />));
+    act(() => client._emitChat(chatId, {
+      event: "goal_status", chat_id: chatId, turn_id: "temporary-owner",
+      status: "running", started_at: 1_000,
+    }));
+    const input = screen.getByLabelText("Message input");
+    for (const text of ["first temporary follow-up", "second temporary follow-up"]) {
+      fireEvent.change(input, { target: { value: text } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    }
+    expect(client.sendMessage).not.toHaveBeenCalled();
+
+    act(() => client._emitChat(chatId, {
+      event: "turn_end", chat_id: chatId, turn_id: "temporary-owner",
+    }));
+    await waitFor(() => expectSendMessageWithTurn(client, chatId, "first temporary follow-up"));
+    expect(client.sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("second temporary follow-up")).toBeInTheDocument();
+    const nextTurnId = client.sendMessage.mock.calls[0][3]!.turnId!;
+    act(() => client._emitChat(chatId, {
+      event: "goal_status", chat_id: chatId, turn_id: nextTurnId,
+      status: "running", started_at: 2_000,
+    }));
+    expect(client.sendMessage).toHaveBeenCalledTimes(1);
+
+    act(() => client._emitChat(chatId, {
+      event: "turn_end", chat_id: chatId, turn_id: nextTurnId,
+    }));
+    await waitFor(() => expectSendMessageWithTurn(client, chatId, "second temporary follow-up"));
+    expect(client.sendMessage).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("group", { name: "Waiting to send" })).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("/webui-thread"))).toBe(false);
+    expect(window.localStorage.getItem(`nanobot.webui.composerQueuedGuidance.v1:${chatId}`)).toBeNull();
   });
 
   it("keeps temporary messages across navigation and drops them after clear", async () => {
@@ -1740,7 +1889,7 @@ describe("ThreadShell", () => {
     await waitFor(() => {
       expect(screen.queryByText("delete me cleanly")).not.toBeInTheDocument();
     });
-    expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 
   it("creates a chat only when the blank landing sends a first message", async () => {
@@ -1797,7 +1946,7 @@ describe("ThreadShell", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Default" }));
     fireEvent.click(await screen.findByRole("option", { name: /^fast\b/i }));
-    expect(await screen.findByText("fast")).toBeInTheDocument();
+    expect(await within(screen.getByTestId("thread-welcome-layout")).findByText("fast")).toBeInTheDocument();
     expect(client.sendSystemCommand).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByLabelText("Message input"), {
@@ -1815,7 +1964,7 @@ describe("ThreadShell", () => {
       rerender(view(session("chat-new", "fast")));
     });
     fireEvent.focus(await screen.findByLabelText("fast"));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast · gpt-5.5 · OpenAI Codex");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("fast gpt-5.5 OpenAI Codex");
     fireEvent.blur(screen.getByLabelText("fast"));
     expect(screen.queryByText("Default")).not.toBeInTheDocument();
     expect(client.sendMessage).not.toHaveBeenCalled();
@@ -2096,9 +2245,9 @@ describe("ThreadShell", () => {
     const greeting = screen.getByRole("heading", { level: 1, name: HERO_GREETING_PATTERN });
     expect(greeting).toHaveAttribute("data-testid", "hero-greeting");
     expect(greeting).toHaveClass("select-none", "whitespace-nowrap");
-    expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Write code" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Create a project plan" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Make a plan" })).not.toBeInTheDocument();
   });
 
   it("does not leak the previous thread when opening a brand-new chat", async () => {
@@ -2156,9 +2305,10 @@ describe("ThreadShell", () => {
 
     expect(screen.queryByText("old answer")).not.toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument(),
+      expect(screen.getByRole("textbox")).toBeInTheDocument(),
     );
-    const input = screen.getByPlaceholderText("Ask anything...");
+    const input = screen.getByRole("textbox");
+    expect(input).toHaveAttribute("placeholder", "Describe what you’d like to do");
     expect(input.className).toContain("min-h-[78px]");
     expect(screen.queryByText("old answer")).not.toBeInTheDocument();
   });
@@ -2206,7 +2356,7 @@ describe("ThreadShell", () => {
     );
 
     const menu = await openMessageActions("answer 100");
-    fireEvent.click(within(menu).getByRole("button", { name: "Fork" }));
+    fireEvent.click(within(menu).getByRole("button", { name: "New chat from here" }));
 
     await waitFor(() =>
       expect(onForkChat).toHaveBeenCalledWith("long-chat", 101),
@@ -2542,6 +2692,117 @@ describe("ThreadShell", () => {
     expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
   });
 
+  it("adopts a completed canonical cache when reconnect revalidation returns 304", async () => {
+    const client = makeClient();
+    const chatId = "reconnect-not-modified";
+    const turnId = "turn-cached-completion";
+    let historyCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (!String(input).includes(`websocket%3A${chatId}/webui-thread`)) {
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
+      historyCalls += 1;
+      if (historyCalls > 1) return { ok: false, status: 304 };
+      return httpJson({
+        ...transcriptFromSimpleMessages([{ role: "user", content: "question", turnId }]),
+        has_pending_tool_calls: true,
+      });
+    }));
+    render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Cached completion"
+      onToggleSidebar={() => {}} onNewChat={() => {}}
+    />));
+    await screen.findByText("question");
+    act(() => {
+      client._emitChat(chatId, {
+        event: "goal_status", chat_id: chatId, turn_id: turnId,
+        status: "running", started_at: 1_700,
+      });
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: turnId, text: "cached prefix",
+      });
+    });
+    await screen.findByText("cached prefix");
+    act(() => client._emitStatus("reconnecting"));
+    // The reconnect coordinator can cache this response before the mounted
+    // thread's conditional request returns the same body through HTTP 304.
+    act(() => webuiThreadCache.set(`websocket:${chatId}`, canonicalThreadPayload({
+      schemaVersion: 3,
+      revision: "completed-revision",
+      has_pending_tool_calls: false,
+      completed_turn_ids: [turnId],
+      messages: [
+        { id: "canonical-user", role: "user", content: "question", turnId, createdAt: 1_000 },
+        { id: "canonical-answer", role: "assistant", content: "full cached answer", turnId, createdAt: 2_000 },
+      ],
+    })!));
+    act(() => client._emitStatus("open"));
+    await screen.findByText("full cached answer");
+    expect(historyCalls).toBe(2);
+    expect(screen.queryByText("cached prefix")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
+  });
+
+  it("shows externally published completion before an older mounted reconnect read returns", async () => {
+    const client = makeClient();
+    const chatId = "published-completion-race";
+    const turnId = "published-completed-turn";
+    let historyCalls = 0;
+    let finishOlderRead!: (response: ReturnType<typeof httpJson>) => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      if (!String(input).includes(`websocket%3A${chatId}/webui-thread`)) {
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+      }
+      historyCalls += 1;
+      if (historyCalls === 1) return Promise.resolve(httpJson({
+        ...transcriptFromSimpleMessages([{ role: "user", content: "question", turnId }]),
+        has_pending_tool_calls: true,
+      }));
+      return new Promise<ReturnType<typeof httpJson>>((resolve) => { finishOlderRead = resolve; });
+    }));
+    render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Published completion"
+      onToggleSidebar={() => {}} onNewChat={() => {}}
+    />));
+    await screen.findByText("question");
+    act(() => {
+      client._emitChat(chatId, {
+        event: "goal_status", chat_id: chatId, turn_id: turnId,
+        status: "running", started_at: 1_700,
+      });
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: turnId, text: "old active prefix",
+      });
+    });
+    await screen.findByText("old active prefix");
+    act(() => client._emitStatus("reconnecting"));
+    act(() => client._emitStatus("open"));
+    await waitFor(() => expect(historyCalls).toBe(2));
+    const completed = canonicalThreadPayload({
+      ...transcriptFromSimpleMessages([
+        { role: "user", content: "question", turnId },
+        { role: "assistant", content: "externally published final answer", turnId },
+      ]),
+      revision: "completed-revision",
+      has_pending_tool_calls: false,
+      completed_turn_ids: [turnId],
+    })!;
+    act(() => webuiThreadCache.set(`websocket:${chatId}`, completed));
+    await screen.findByText("externally published final answer");
+    expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
+    await act(async () => finishOlderRead(httpJson({
+      ...transcriptFromSimpleMessages([{ role: "user", content: "question", turnId }]),
+      revision: "older-active-revision",
+      has_pending_tool_calls: true,
+      active_turn_id: turnId,
+      completed_turn_ids: [],
+    })));
+    expect(screen.getByText("externally published final answer")).toBeInTheDocument();
+    expect(screen.queryByText("old active prefix")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
+    expect(webuiThreadCache.get(`websocket:${chatId}`)).toBe(completed);
+  });
+
   it("refreshes after opening when mounted while the socket is reconnecting", async () => {
     const client = makeClient();
     client._emitStatus("reconnecting");
@@ -2664,6 +2925,7 @@ describe("ThreadShell", () => {
         observedTurnIds: [canonicalTurnId],
         hasPendingToolCalls: false,
         activeTurnId: null,
+        completionIdsProvided: false,
       },
     );
   });
@@ -2844,6 +3106,7 @@ describe("ThreadShell", () => {
         observedTurnIds: [],
         hasPendingToolCalls: false,
         activeTurnId: null,
+        completionIdsProvided: false,
       },
     );
   });
@@ -2917,7 +3180,7 @@ describe("ThreadShell", () => {
     expect(client.canReconcileCanonicalCompletion).toHaveBeenCalled();
   });
 
-  it("rolls back a committed candidate when the final lifecycle recheck loses", async () => {
+  it("keeps completed content while deferring a rejected final lifecycle reconciliation", async () => {
     const client = makeClient();
     const turnId = "turn-layout-recheck";
     let historyCalls = 0;
@@ -2987,8 +3250,8 @@ describe("ThreadShell", () => {
     await waitFor(() =>
       expect(client.reconcileCanonicalCompletion).toHaveBeenCalledTimes(1),
     );
-    expect(screen.getByText("layout partial")).toBeInTheDocument();
-    expect(screen.queryByText("layout canonical answer")).not.toBeInTheDocument();
+    expect(screen.queryByText("layout partial")).not.toBeInTheDocument();
+    expect(screen.getByText("layout canonical answer")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
 
     act(() => client._emitSessionUpdate("layout-recheck", "thread"));
@@ -2999,7 +3262,7 @@ describe("ThreadShell", () => {
     expect(client.reconcileCanonicalCompletion).toHaveBeenCalledTimes(2);
   });
 
-  it("accepts the first reconnect refresh after switching away and back", async () => {
+  it("adopts a completed equal-length history when returning after an inactive outage", async () => {
     const client = makeClient();
     const oldTurnId = "turn-old";
     let newTurnId = "";
@@ -3085,15 +3348,10 @@ describe("ThreadShell", () => {
 
     rerender(view("chat-version-b"));
     await waitFor(() => expect(screen.getByText("other chat")).toBeInTheDocument());
-    rerender(view("chat-version-a"));
-    await waitFor(() => expect(chatACalls).toBe(3));
-    expect(screen.getByText("partial answer")).toBeInTheDocument();
-    expect(screen.queryByText("partial answer completed")).not.toBeInTheDocument();
-
     act(() => client._emitStatus("reconnecting"));
     act(() => client._emitStatus("open"));
-
-    await waitFor(() => expect(chatACalls).toBe(4));
+    rerender(view("chat-version-a"));
+    await waitFor(() => expect(chatACalls).toBe(3));
     await waitFor(() =>
       expect(screen.getByText("partial answer completed")).toBeInTheDocument(),
     );
@@ -3176,6 +3434,224 @@ describe("ThreadShell", () => {
 
     expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
     expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(["both", "current", "canonical"] as const)("keeps repeated guidance order and newer live output with %s turn ids", async (guidanceTurnIds) => {
+    const client = makeClient();
+    const chatId = "completed-guidance-new-tail";
+    const turnId = "completed-guided-turn";
+    const guidanceTurnId = "guidance-input";
+    const repeatedGuidanceTurnId = "repeated-guidance-input";
+    let historyCalls = 0;
+    let resolveRefresh!: (response: ReturnType<typeof httpJson>) => void;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      if (!String(input).includes(`websocket%3A${chatId}/webui-thread`)) {
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+      }
+      historyCalls += 1;
+      if (historyCalls === 1) return Promise.resolve(httpJson({
+        ...transcriptFromSimpleMessages([{ role: "user", content: "guided question", turnId }]),
+        has_pending_tool_calls: true,
+      }));
+      return new Promise<ReturnType<typeof httpJson>>((resolve) => { resolveRefresh = resolve; });
+    }));
+    render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Guided turn"
+      onToggleSidebar={() => {}} onNewChat={() => {}}
+    />));
+    await screen.findByText("guided question");
+    act(() => {
+      client._emitChat(chatId, {
+        event: "goal_status", chat_id: chatId, status: "running",
+        started_at: 1_700, turn_id: turnId,
+      });
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, text: "first partial segment", turn_id: turnId,
+      });
+    });
+    await screen.findByText("first partial segment");
+    act(() => {
+      client._emitChat(chatId, {
+        event: "stream_end", chat_id: chatId, turn_id: turnId, resuming: true,
+      });
+      client._emitChat(chatId, {
+        event: "user_message", chat_id: chatId,
+        turn_id: guidanceTurnIds === "canonical" ? undefined : guidanceTurnId,
+        text: "supplemental guidance", starts_turn: false, active_turn_id: turnId,
+      });
+      client._emitChat(chatId, {
+        event: "user_message", chat_id: chatId,
+        turn_id: guidanceTurnIds === "canonical" ? undefined : repeatedGuidanceTurnId,
+        text: "supplemental guidance", starts_turn: false, active_turn_id: turnId,
+      });
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: turnId, text: "last partial segment",
+      });
+    });
+    await screen.findByText("last partial segment");
+    act(() => client._emitSessionUpdate(chatId, "thread"));
+    await waitFor(() => expect(historyCalls).toBe(2));
+    act(() => client._emitChat(chatId, {
+      event: "turn_end", chat_id: chatId, turn_id: turnId,
+    }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message input" }), {
+      target: { value: "new local question" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    const newerTurnId = client.sendMessage.mock.calls[0]?.[3]?.turnId;
+    expect(newerTurnId).toBeTruthy();
+    act(() => {
+      client._emitChat(chatId, {
+        event: "goal_status", chat_id: chatId, status: "running",
+        started_at: 2_000, turn_id: newerTurnId,
+      });
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: newerTurnId, text: "newer live reply",
+      });
+    });
+    await screen.findByText("newer live reply");
+    await act(async () => resolveRefresh(httpJson({
+      ...transcriptFromSimpleMessages([
+        { role: "user", content: "guided question", turnId },
+        { role: "assistant", content: "canonical first segment", turnId },
+        { role: "user", content: "supplemental guidance",
+          turnId: guidanceTurnIds === "current" ? undefined : guidanceTurnId },
+        { role: "user", content: "supplemental guidance",
+          turnId: guidanceTurnIds === "current" ? undefined : repeatedGuidanceTurnId },
+        { role: "assistant", content: "canonical final segment", turnId },
+      ]),
+      has_pending_tool_calls: false,
+      completed_turn_ids: [turnId],
+    })));
+    const first = await screen.findByText("canonical first segment");
+    const guidance = screen.getAllByText("supplemental guidance");
+    const final = screen.getByText("canonical final segment");
+    const newer = screen.getByText("newer live reply");
+    expect(guidance).toHaveLength(2);
+    expect(first.compareDocumentPosition(guidance[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(guidance[0].compareDocumentPosition(guidance[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(guidance[1].compareDocumentPosition(final) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(final.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText("first partial segment")).not.toBeInTheDocument();
+    expect(screen.queryByText("last partial segment")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
+    act(() => {
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: turnId, text: "obsolete delayed delta",
+      });
+      client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: newerTurnId, text: " continued",
+      });
+    });
+    await screen.findByText("newer live reply continued");
+    expect(screen.queryByText(/obsolete delayed delta/)).not.toBeInTheDocument();
+    expect(screen.queryByText("newer live reply")).not.toBeInTheDocument();
+  });
+
+  it("keeps canonical completed turns after an older cached pagination prefix", async () => {
+    const client = makeClient();
+    const chatId = "completed-window-order";
+    const completedTurnId = "completed-cached-turn";
+    const unseenTurnId = "other-tab-completed-turn";
+    const newerTurnId = "new-local-turn";
+    const messageCache = new ThreadMessageCache(() => false);
+    messageCache.set(chatId, [
+      { id: "older-page", role: "assistant", content: "older paginated answer", createdAt: 1 },
+      { id: "cached-user", role: "user", content: "completed question", turnId: completedTurnId, createdAt: 2 },
+      { id: "cached-prefix", role: "assistant", content: "outdated prefix", turnId: completedTurnId, createdAt: 3 },
+      { id: "new-user", role: "user", content: "new local question", turnId: newerTurnId, createdAt: 7 },
+      { id: "new-answer", role: "assistant", content: "new local stream", turnId: newerTurnId, isStreaming: true, createdAt: 8 },
+    ]);
+    client._emitChat(chatId, {
+      event: "goal_status", chat_id: chatId, turn_id: newerTurnId, status: "running", started_at: 2_000,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (!String(input).includes(`websocket%3A${chatId}/webui-thread`)) {
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
+      return httpJson({
+        ...transcriptFromSimpleMessages([
+          { role: "user", content: "completed question", turnId: completedTurnId },
+          { role: "assistant", content: "completed reply", turnId: completedTurnId },
+          { role: "user", content: "other tab question", turnId: unseenTurnId },
+          { role: "assistant", content: "other tab completed reply", turnId: unseenTurnId },
+        ]),
+        has_pending_tool_calls: false,
+        completed_turn_ids: [completedTurnId, unseenTurnId],
+        page: { before_cursor: "older-page", has_more_before: true, user_message_offset: 25 },
+      });
+    }));
+    render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Completed latest window" messageCache={messageCache}
+      onToggleSidebar={() => {}} onNewChat={() => {}}
+    />));
+    const completed = await screen.findByText("completed reply");
+    const older = screen.getByText("older paginated answer");
+    const other = screen.getByText("other tab completed reply");
+    const newer = screen.getByText("new local stream");
+    expect(older.compareDocumentPosition(completed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(completed.compareDocumentPosition(other) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(other.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText("outdated prefix")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
+  });
+
+  it.each(["identified", "anonymous"] as const)("keeps completed guidance after a paginated prefix with %s live identity", async (guidanceIdentity) => {
+    const client = makeClient();
+    const chatId = "completed-guidance-paged-prefix";
+    const messageCache = new ThreadMessageCache(() => false);
+    messageCache.set(chatId, [
+      { id: "old-user", role: "user", content: "continue", createdAt: 1 },
+      { id: "old-answer", role: "assistant", content: "older answer", createdAt: 2 },
+      { id: "question", role: "user", content: "current question", turnId: "main", createdAt: 3 },
+      { id: "first", role: "assistant", content: "first partial", turnId: "main", createdAt: 4 },
+      { id: "guidance", role: "user", content: "continue",
+        ...(guidanceIdentity === "identified" ? { turnId: "guidance" } : {}), createdAt: 5 },
+      { id: "last", role: "assistant", content: "last partial", turnId: "main", createdAt: 6 },
+      { id: "new-user", role: "user", content: "new question", turnId: "new", createdAt: 7 },
+      { id: "new-answer", role: "assistant", content: "new live answer", turnId: "new", isStreaming: true, createdAt: 8 },
+    ]);
+    client._emitChat(chatId, {
+      event: "goal_status", chat_id: chatId, turn_id: "new", status: "running", started_at: 2_000,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (!String(input).includes(`websocket%3A${chatId}/webui-thread`)) {
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
+      return httpJson({
+        ...transcriptFromSimpleMessages([
+          { role: "user", content: "current question", turnId: "main" },
+          { role: "assistant", content: "completed first", turnId: "main" },
+          { role: "user", content: "continue", turnId: "guidance" },
+          { role: "assistant", content: "completed last", turnId: "main" },
+        ]),
+        has_pending_tool_calls: false,
+        completed_turn_ids: ["main"],
+        page: { before_cursor: "older-page", has_more_before: true, user_message_offset: 25 },
+      });
+    }));
+    render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Completed paged guidance" messageCache={messageCache}
+      onToggleSidebar={() => {}} onNewChat={() => {}}
+    />));
+    await screen.findByText("completed last");
+    const messages = [
+      ...screen.getAllByText("continue"),
+      ...["older answer", "current question", "completed first", "completed last", "new question", "new live answer"]
+        .map((text) => screen.getByText(text)),
+    ];
+    messages.sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    expect(messages.map((message) => message.textContent)).toEqual([
+      "continue", "older answer", "current question", "completed first",
+      "continue", "completed last", "new question", "new live answer",
+    ]);
+    expect(screen.queryByText("first partial")).not.toBeInTheDocument();
+    expect(screen.queryByText("last partial")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
+    act(() => client._emitChat(chatId, {
+      event: "delta", chat_id: chatId, turn_id: "new", text: " continued",
+    }));
+    await screen.findByText("new live answer continued");
   });
 
   it("remembers explicit completed turns on initial history load", async () => {
@@ -3429,6 +3905,120 @@ describe("ThreadShell", () => {
       }),
     ));
     expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
+  });
+
+  it.each(["persisted-turn", "recovery:restored-turn"])(
+    "loads history when opening a running session without settling %s",
+    async (turnId) => {
+      const client = makeClient();
+      const chatId = "running-history";
+      client._emitChat(chatId, {
+        event: "goal_status", chat_id: chatId, status: "running",
+        started_at: 1_700, turn_id: turnId,
+      });
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes(`websocket%3A${chatId}/webui-thread`)) {
+          return httpJson({
+            ...transcriptFromSimpleMessages([
+              { role: "user", content: "previous question", turnId: "finished-turn" },
+              { role: "assistant", content: "previous answer", turnId: "finished-turn" },
+              { role: "user", content: "current question", turnId: "persisted-turn" },
+              { role: "assistant", content: "saved answer prefix", turnId: "persisted-turn" },
+            ]),
+            completed_turn_ids: ["finished-turn"],
+            has_pending_tool_calls: true,
+            active_turn_id: turnId,
+          });
+        }
+        return { ok: false, status: 404, json: async () => ({}) };
+      }));
+
+      render(wrap(client, <ThreadShell
+        session={session(chatId)} title="Running history"
+        onToggleSidebar={() => {}} onNewChat={() => {}}
+      />));
+
+      await screen.findByText("previous answer");
+      expect(screen.getByText("current question")).toBeInTheDocument();
+      expect(screen.getByText("saved answer prefix")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
+      expect(client.reconcileCanonicalCompletion).not.toHaveBeenCalled();
+      expect(client.getRunStartedAt(chatId)).toBe(1_700);
+
+      const input = screen.getByRole("textbox", { name: "Message input" });
+      fireEvent.change(input, { target: { value: "queued guidance" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(client.sendMessage).not.toHaveBeenCalled();
+
+      act(() => client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: turnId, text: "continued",
+      }));
+      await screen.findByText("continued");
+      act(() => client._emitChat(chatId, {
+        event: "delta", chat_id: chatId, turn_id: turnId, text: " answer",
+      }));
+      await screen.findByText("continued answer");
+      expect(screen.getByText("saved answer prefix")).toBeInTheDocument();
+      expect(client.sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("prepends earlier history while preserving the active answer cursor", async () => {
+    const client = makeClient();
+    const chatId = "running-paged-history";
+    const turnId = "current-turn";
+    client._emitChat(chatId, {
+      event: "goal_status", chat_id: chatId, status: "running",
+      started_at: 1_700, turn_id: turnId,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes(`websocket%3A${chatId}/webui-thread`)) {
+        return { ok: false, status: 404, json: async () => ({}) };
+      }
+      if (url.includes("before=")) {
+        return httpJson(canonicalThreadPayload({
+          schemaVersion: 3,
+          messages: [
+            { id: "older-user", role: "user", content: "older question", turnId: "older-turn", createdAt: 1 },
+            { id: "older-answer", role: "assistant", content: "older answer", turnId: "older-turn", createdAt: 2 },
+          ],
+          has_pending_tool_calls: false,
+          completed_turn_ids: ["older-turn"],
+          page: { before_cursor: null, has_more_before: false, user_message_offset: 0 },
+        }));
+      }
+      return httpJson({
+        ...transcriptFromSimpleMessages([{ role: "user", content: "current question", turnId }]),
+        has_pending_tool_calls: true,
+        active_turn_id: turnId,
+        completed_turn_ids: [],
+        page: { before_cursor: "older-page", has_more_before: true, user_message_offset: 1 },
+      });
+    }));
+    const { container } = render(wrap(client, <ThreadShell
+      session={session(chatId)} title="Running paged history"
+      onToggleSidebar={() => {}} onNewChat={() => {}}
+    />));
+    await screen.findByText("current question");
+    act(() => client._emitChat(chatId, {
+      event: "delta", chat_id: chatId, turn_id: turnId, text: "live answer",
+    }));
+    await screen.findByText("live answer");
+
+    fireEvent.wheel(container.querySelector(".thread-message-viewport")!, { deltaY: -100 });
+    const older = await screen.findByText("older answer");
+    const current = screen.getByText("current question");
+    expect(older.compareDocumentPosition(current) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("live answer")).toBeInTheDocument();
+    expect(client.reconcileCanonicalCompletion).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
+
+    act(() => client._emitChat(chatId, {
+      event: "delta", chat_id: chatId, turn_id: turnId, text: " continued",
+    }));
+    await screen.findByText("live answer continued");
+    expect(screen.getAllByText("older answer")).toHaveLength(1);
   });
 
   it("converges after reconnecting before the first assistant delta", async () => {
@@ -4361,10 +4951,10 @@ describe("ThreadShell", () => {
     );
     await act(async () => {});
 
-    expect(screen.queryByText("Design an app icon")).not.toBeInTheDocument();
+    expect(screen.queryByText("Design an icon")).not.toBeInTheDocument();
     expect(screen.queryByText("Write code")).not.toBeInTheDocument();
 
-    expect(screen.queryByText("Design an app icon")).not.toBeInTheDocument();
+    expect(screen.queryByText("Design an icon")).not.toBeInTheDocument();
     expect(screen.queryByText("Write code")).not.toBeInTheDocument();
   });
 
@@ -4886,6 +5476,31 @@ describe("ThreadShell", () => {
 
     expect(screen.getByRole("option", { name: /Same project/i })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Other project/i })).toBeInTheDocument();
+  });
+
+  it("keeps normal running controls when attaching to a resumed task", async () => {
+    const client = makeClient();
+    render(wrap(
+      client,
+      <ThreadShell
+        session={session("resuming-chat")}
+        title="Resuming chat"
+        onToggleSidebar={() => {}}
+      />,
+    ));
+
+    await screen.findByLabelText("Message input");
+    act(() => {
+      client._emitChat("resuming-chat", {
+        event: "attached",
+        chat_id: "resuming-chat",
+        recovery_state: { recovery_id: "recovery-1", status: "resuming" },
+      });
+    });
+
+    expect(screen.queryByText("Restoring interrupted task…")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }));
+    expect(client.sendMessage).toHaveBeenCalledWith("resuming-chat", "/stop");
   });
 
   it("allows a new turn after a completed recovery state", async () => {

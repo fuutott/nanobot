@@ -146,6 +146,7 @@ function fakeClient() {
         return () => set!.delete(h);
       },
       sendMessage: vi.fn(),
+      sendAttachments: vi.fn().mockResolvedValue(undefined),
       requestMutation,
       finishRunLocally: vi.fn(),
       newChat: vi.fn(),
@@ -859,6 +860,31 @@ describe("useNanobotStream", () => {
     );
 
     expect(result.current.messages.at(-1)?.kind).toBe("trace");
+    expect(result.current.isStreaming).toBe(false);
+  });
+
+  it("restores cached tool activity according to each conversation's completed turns", () => {
+    const fake = fakeClient();
+    const initialMessages: UIMessage[] = [{
+      id: "cached-tool-activity", role: "tool", kind: "trace", content: "exec(…)",
+      traces: ["exec(…)"], turnId: "completed-tool-turn", isStreaming: true, createdAt: 1,
+    }];
+    const initialProps = {
+      chatId: "completed-tools",
+      initialMessages,
+      completedTurnIds: ["completed-tool-turn"],
+    };
+    const { result, rerender } = renderHook((props: typeof initialProps) => useNanobotStream(
+      props.chatId, props.initialMessages, false, undefined, undefined, props.completedTurnIds,
+    ), { wrapper: wrap(fake.client), initialProps });
+    expect(result.current.isStreaming).toBe(false);
+    rerender({
+      chatId: "active-tools",
+      initialMessages: [{ ...initialMessages[0], turnId: "active-tool-turn" }],
+      completedTurnIds: [],
+    });
+    expect(result.current.isStreaming).toBe(true);
+    rerender(initialProps);
     expect(result.current.isStreaming).toBe(false);
   });
 
@@ -2721,7 +2747,7 @@ describe("useNanobotStream", () => {
 
     expect(result.current.messages[0].media).toEqual([attachment.preview]);
     expect(result.current.messages[0].images).toBeUndefined();
-    expect(fake.client.sendMessage).toHaveBeenCalledWith(
+    expect(fake.client.sendAttachments).toHaveBeenCalledWith(
       "chat-file-send",
       "summarize",
       [attachment.media],

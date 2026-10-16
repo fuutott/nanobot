@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent.session_helpers import mock_session_manager
 from nanobot.agent.context import TranscriptInput
 from nanobot.agent.goal_permission import goal_mutation_allowed, goal_mutation_permission
 from nanobot.agent.tools.context import RequestContext
@@ -46,7 +47,7 @@ def _make_loop(tmp_path):
     provider.generation = GenerationSettings()
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
-         patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.SessionManager", side_effect=mock_session_manager), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
@@ -159,6 +160,7 @@ async def test_goal_command_can_implement_plan_from_prior_discussion(tmp_path):
     session = loop.sessions.get_or_create("cli:direct")
     session.add_message("user", "Let's agree on the migration implementation.")
     session.add_message("assistant", "Use the staged migration plan and run integration tests.")
+    loop.sessions.save(session)
 
     result = await loop._process_message(
         InboundMessage(
@@ -172,6 +174,7 @@ async def test_goal_command_can_implement_plan_from_prior_discussion(tmp_path):
     assert result is not None
     assert result.content == "done"
     assert goal_mutation_allowed() is False
+    session = await loop.sessions.state.get(session.key)
     assert session.metadata[GOAL_STATE_KEY]["status"] == "completed"
     first_request = provider.chat_stream_with_retry.await_args_list[0].kwargs["messages"]
     assert "staged migration plan" in str(first_request)
@@ -243,6 +246,7 @@ async def test_runtime_context_is_persisted_as_next_turn_prompt_prefix(tmp_path)
     assert second_wire[3]["content"].startswith("second turn")
     assert len(provider_calls) == 2
 
+    session = await loop.sessions.state.get(session.key)
     persisted_first_user = session.messages[0]
     assert persisted_first_user["content"] == first_wire[1]["content"]
     assert public_history_message(persisted_first_user)["content"] == "first turn $review"
@@ -276,6 +280,7 @@ async def test_webui_quote_reaches_model_without_leaking_into_public_history(tmp
     request = provider.chat_stream_with_retry.await_args.kwargs["messages"]
     assert "What does this mean?" in str(request)
     assert "the selected answer excerpt" in str(request)
+    session = await loop.sessions.state.get(session.key)
     assert "the selected answer excerpt" in str(session.messages[0]["content"])
     assert public_history_message(session.messages[0])["content"] == "What does this mean?"
 
@@ -506,9 +511,8 @@ async def test_loop_retries_think_only_final_response(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_streamed_flag_not_set_on_llm_error(tmp_path):
-    """When LLM errors during a streaming-capable channel interaction,
-    _streamed must NOT be set so ChannelManager delivers the error."""
+async def test_llm_error_returns_regular_response_instead_of_streamed_event(tmp_path):
+    """LLM errors must not produce StreamedResponseEvent, so channels deliver the error."""
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.events import InboundMessage
     from nanobot.bus.queue import MessageBus
@@ -617,7 +621,7 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     session = loop.sessions.get_or_create("cli:test")
     assert [
         {key: value for key, value in message.items() if key in {"role", "content"}}
-        for message in session.messages
+        for message in map(public_history_message, session.messages)
     ] == [
         {"role": "user", "content": "first question"},
         {"role": "assistant", "content": _PERSISTED_MODEL_ERROR_PLACEHOLDER},
@@ -640,8 +644,8 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, monkeypatch):
-    from nanobot.agent.subagent import SubagentManager, SubagentStatus
+async def test_subagent_max_iterations_announces_partial_incomplete_result(tmp_path, monkeypatch):
+    from nanobot.agent.subagent import SubagentManager
     from nanobot.bus.queue import MessageBus
 
     bus = MessageBus()
@@ -658,24 +662,28 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
         consolidator=MagicMock(),
         max_iterations=2,
     )
-    mgr._announce_result = AsyncMock()
 
     async def fake_execute(self, **kwargs):
         return "tool result"
 
     monkeypatch.setattr("nanobot.agent.tools.filesystem.ListDirTool.execute", fake_execute)
 
-    status = SubagentStatus(task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic())
-    await mgr._run_subagent(
-        "sub-1",
-        "do task",
-        "label",
-        {"channel": "test", "chat_id": "c1"},
-        status,
-        LLMRuntime.capture(provider, "test-model", context_window_tokens=128_000),
+    await mgr.spawn(
+        task="do task",
+        label="label",
+        origin_channel="test",
+        origin_chat_id="c1",
+        runtime=LLMRuntime.capture(provider, "test-model", context_window_tokens=128_000),
     )
+    await asyncio.gather(*mgr._running_tasks.values(), return_exceptions=True)
 
-    mgr._announce_result.assert_awaited_once()
-    args = mgr._announce_result.await_args.args
-    assert args[3] == "Task completed but no final response was generated."
-    assert args[5] == "ok"
+    status = next(iter(mgr.statuses_for_session("test:c1").values()))
+    assert status.state == "incomplete"
+    assert status.stop_reason == "max_iterations"
+    assert status.partial is True
+    assert status.result == "working"
+    notice = await asyncio.wait_for(bus.consume_inbound(), timeout=1)
+    assert notice.metadata["subagent_state"] == "incomplete"
+    assert notice.metadata["subagent_partial"] is True
+    assert "working" in notice.content
+    await mgr.close()

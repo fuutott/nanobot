@@ -7,17 +7,23 @@ import json
 import time
 import uuid
 import warnings
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
 
 from loguru import logger
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.hooks import create_file_edit_activity_hook
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
-from nanobot.agent.tools.base import ToolResult
+from nanobot.agent.session_activity import SessionActivity
+from nanobot.agent.subagent_sessions import SubagentSessions
+from nanobot.agent.subagent_status import SubagentState as SubagentState
+from nanobot.agent.subagent_status import SubagentStatus
+from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
@@ -28,17 +34,22 @@ from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStates
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.bus.runtime_events import RuntimeEventContext, SubagentTaskChanged
 from nanobot.config.schema import AgentDefaults, ToolsConfig
+from nanobot.events import AgentEvent, EventSink
 from nanobot.llm_usage.context import LLMUsageSource, current_llm_usage_source
-from nanobot.providers.base import LLMProvider, LLMUsage
+from nanobot.providers.base import LLMProvider, ToolCallRequest
 from nanobot.security.workspace_access import (
     WorkspaceScope,
     bind_workspace_scope,
     reset_workspace_scope,
     workspace_sandbox_status,
 )
+from nanobot.session.manager import Session, SessionManager, SessionPolicy
+from nanobot.utils.cancellation import shield_and_drain
 from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.prompt_templates import render_template
 
@@ -53,38 +64,135 @@ class _SubagentOrigin(TypedDict):
     llm_usage_source: NotRequired[LLMUsageSource]
 
 
-@dataclass(slots=True)
-class SubagentStatus:
-    """Real-time status of a running subagent."""
 
+
+class SubagentControlError(ValueError):
+    """A task control request violates ownership or admission rules."""
+
+
+class SubagentMessageReceipt(TypedDict):
     task_id: str
-    label: str
-    task_description: str
-    started_at: float          # time.monotonic()
-    # queued | initializing | awaiting_tools | tools_completed | final_response | done | error
-    phase: str = "initializing"
-    iteration: int = 0
-    tool_events: list[dict[str, str]] = field(default_factory=list)
-    usage: LLMUsage | None = None
+    message_id: str
+    receipt: Literal["accepted"]
+    delivered: Literal[False]
+
+
+@dataclass(frozen=True, slots=True)
+class _SubagentOutcome:
+    """Execution outcome, independent of process cleanup errors."""
+
+    state: Literal["done", "incomplete", "error", "cancelled"]
+    result: str
     stop_reason: str | None = None
     error: str | None = None
 
 
-class _SubagentHook(AgentHook):
-    """Hook for subagent execution — logs tool calls and updates status."""
+@dataclass(slots=True)
+class _SubagentTask:
+    """Own one execution, its inbox, and resources until cleanup succeeds."""
 
-    def __init__(self, task_id: str, status: SubagentStatus | None = None) -> None:
+    status: SubagentStatus
+    session: Session
+    runtime: LLMRuntime
+    origin: _SubagentOrigin
+    origin_message_id: str | None = None
+    workspace_scope: WorkspaceScope | None = None
+    announce: bool = True
+    # Fork: per-subagent knobs (system prompt override, tool/skill whitelists).
+    system_prompt_override: str | None = None
+    tools_filter: list[str] | None = None
+    skills_filter: list[str] | None = None
+    begun: bool = False
+    suppress_notice: bool = False
+    inbox: list[tuple[str, str]] = field(default_factory=list)
+    outcome: _SubagentOutcome | None = None
+    exec_manager: ExecSessionManager = field(default_factory=ExecSessionManager)
+    cleanup_task: asyncio.Task[int] | None = None
+
+    def raise_if_stopping(self) -> None:
+        if self.outcome is not None:
+            raise asyncio.CancelledError
+
+    def decide(self, outcome: _SubagentOutcome) -> bool:
+        """Seal execution once, before cancellation or cleanup can yield."""
+        if self.outcome is not None:
+            return False
+        self.outcome = outcome
+        self.status.state = self.status.phase = "stopping"
+        return True
+
+    def finish(self, max_chars: int, cleanup_error: str | None = None) -> _SubagentOutcome:
+        execution_outcome = self.outcome
+        if execution_outcome is None:
+            raise RuntimeError("cannot finish a task before execution has an outcome")
+        outcome = execution_outcome
+        if cleanup_error is not None:
+            outcome = _SubagentOutcome("error", cleanup_error, "error", cleanup_error)
+        status = self.status
+        has_partial_result = outcome.state != "done" and bool(status.result)
+        if outcome.state != "done" and status.result:
+            outcome = replace(outcome, result=status.result)
+        status.state = status.phase = outcome.state
+        status.finished_at = time.monotonic()
+        status.completed_at = time.time()
+        status.result = outcome.result[:max_chars]
+        status.partial = has_partial_result
+        status.stop_reason = outcome.stop_reason
+        status.error = outcome.error[:max_chars] if outcome.error else None
+        status.task_description = status.task_description[:max_chars]
+        status.label = status.label[:256]
+        status.tool_events = []
+        for message_id, _ in self.inbox:
+            status.receipts[message_id] = "undelivered"
+        self.inbox.clear()
+        # Failed cleanup can retain this task after its public status is evicted.
+        self.outcome = replace(
+            execution_outcome,
+            result=execution_outcome.result[:max_chars],
+            error=execution_outcome.error[:max_chars] if execution_outcome.error else None,
+        )
+        return outcome
+
+    def snapshot(self) -> SubagentStatus:
+        return deepcopy(self.status)
+
+
+class _SubagentHook(AgentHook):
+    """Update task status at runner boundaries."""
+
+    def __init__(self, status: SubagentStatus | None = None,
+                 *, check_active: Callable[[], None] | None = None,
+                 max_result_chars: int = 16000,
+                 on_status: Callable[[SubagentStatus], Awaitable[None]] | None = None) -> None:
         super().__init__()
-        self._task_id = task_id
         self._status = status
+        self._check_active = check_active
+        self._max_result_chars = max_result_chars
+        self._on_status = on_status
+
+    def _remember_output(self, context: AgentHookContext) -> None:
+        if self._status is None or context.error or context.response is None:
+            return
+        content = context.response.content
+        if content and content.strip():
+            self._status.result = content[:self._max_result_chars]
+            self._status.partial = True
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
-        for tool_call in context.tool_calls:
-            args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-            logger.debug(
-                "Subagent [{}] executing: {} with arguments: {}",
-                self._task_id, tool_call.name, args_str,
-            )
+        self._remember_output(context)
+        if self._status is not None:
+            self._status.tool_events = [
+                {"name": call.name, "status": "running"} for call in context.tool_calls
+            ]
+        if self._status is not None and self._on_status is not None:
+            await self._on_status(self._status)
+
+    async def before_execute_tool(
+        self, context: AgentHookContext, tool_call: ToolCallRequest,
+        tool: Tool | None, params: dict[str, Any],
+    ) -> None:
+        if self._check_active is not None:
+            self._check_active()
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         if self._status is None:
@@ -92,8 +200,11 @@ class _SubagentHook(AgentHook):
         self._status.iteration = context.iteration
         self._status.tool_events = list(context.tool_events)
         self._status.usage = context.usage
+        self._remember_output(context)
         if context.error:
             self._status.error = str(context.error)
+        if self._on_status is not None:
+            await self._on_status(self._status)
 
 
 class SubagentManager:
@@ -113,6 +224,7 @@ class SubagentManager:
         max_concurrent_subagents: int | None = None,
         *,
         consolidator: Consolidator,
+        session_manager: SessionManager | None = None,
         provider_factory: Callable[[str | None, str | None], tuple[LLMProvider, str]] | None = None,
         available_providers: list[str] | None = None,
         available_models: list[str] | None = None,
@@ -164,28 +276,210 @@ class SubagentManager:
         self._run_slots = asyncio.Semaphore(self.max_concurrent_subagents)
         self.runner = AgentRunner()
         self._exec_session_manager = ExecSessionManager()
+        self._running_tasks: dict[str, asyncio.Task[str]] = {}
+        self._tasks: dict[str, _SubagentTask] = {}
+        self._terminal_statuses: dict[str, SubagentStatus] = {}
+        self._closed = False
+        self._close_task: asyncio.Task[int] | None = None
+        self._admitting = 0
+        self.sessions = SubagentSessions(session_manager) if session_manager is not None else None
+        # Fork: per-subagent provider/model override; lists surfaced through MyTool.
         self._provider_factory = provider_factory
-        # Surfaced through MyTool so the agent can discover what it can pass to spawn.
         self.available_providers = list(available_providers or [])
         self.available_models = list(available_models or [])
-        self._running_tasks: dict[str, asyncio.Task[str]] = {}
-        self._task_statuses: dict[str, SubagentStatus] = {}
-        self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+
+    MAX_ACTIVE = 128
+    MAX_TERMINAL = 128
+    MAX_INBOX = 16
+    MAX_MESSAGES = 128
+    MAX_MESSAGE_BYTES = 8192
+
+    CANCEL_WAIT_SECONDS = 5.0
+
+    async def _save_status(
+        self, status: SubagentStatus,
+    ) -> None:
+        status.revision += 1
+        if self.sessions is not None and not await self.sessions.save(status):
+            return
+        self._publish_status(status)
+
+    def _publish_status(self, status: SubagentStatus) -> None:
+        origin = self._tasks[status.task_id].origin
+        self.bus.publish_nowait(SubagentTaskChanged(
+            context=RuntimeEventContext(
+                channel=origin["channel"], chat_id=origin["chat_id"], session_key=status.owner,
+            ),
+            task_id=status.task_id,
+        ))
+
+    async def recover_interrupted(self) -> None:
+        """Recover observations only after the host has claimed execution ownership."""
+        if self.sessions is not None:
+            await self.sessions.interrupt_pending()
+
+    def _start_cleanup(self, record: _SubagentTask, *, retry: bool = False) -> asyncio.Task[int]:
+        cleanup = record.cleanup_task
+        if retry and cleanup is not None and cleanup.done():
+            record.cleanup_task = None
+        if record.cleanup_task is None:
+            record.cleanup_task = asyncio.create_task(record.exec_manager.close_all())
+            record.cleanup_task.add_done_callback(partial(self._cleanup_done, record))
+        return record.cleanup_task
+
+    def _cleanup_done(self, record: _SubagentTask, task: asyncio.Task[int]) -> None:
+        if not task.cancelled() and task.exception() is None:
+            self._release_task(record)
+
+    def _release_task(self, record: _SubagentTask) -> None:
+        cleanup = record.cleanup_task
+        if (record.status.finished_at is not None
+                and record.status.task_id not in self._running_tasks
+                and cleanup is not None and cleanup.done()
+                and not cleanup.cancelled() and cleanup.exception() is None):
+            self._tasks.pop(record.status.task_id, None)
+
+    async def _finish(self, record: _SubagentTask,
+                cleanup_error: str | None = None) -> _SubagentOutcome:
+        outcome = record.finish(self.max_tool_result_chars, cleanup_error)
+        await self._save_transcript(record)
+        await self._save_status(record.status)
+        self._terminal_statuses[record.status.task_id] = record.snapshot()
+        while len(self._terminal_statuses) > self.MAX_TERMINAL:
+            del self._terminal_statuses[next(iter(self._terminal_statuses))]
+        return outcome
+
+    async def _drain_inbox(self, record: _SubagentTask) -> list[dict[str, str]]:
+        record.raise_if_stopping()
+        snapshot, record.inbox = record.inbox, []
+        for message_id, _ in snapshot:
+            record.status.receipts[message_id] = "delivered"
+        if snapshot:
+            await self._save_status(record.status)
+        return [{"role": "user", "content": content} for _, content in snapshot]
+
+    def _owned_status(self, task_id: str, owner: str | None) -> SubagentStatus:
+        status = self._terminal_statuses.get(task_id)
+        record = self._tasks.get(task_id)
+        if status is None and record is not None and record.status.finished_at is None:
+            status = record.status
+        if self.sessions is not None and owner:
+            if not self.sessions.exists(owner) or not self.sessions.contains(task_id, owner):
+                raise SubagentControlError("task unavailable")
+            if status is None:
+                status = self.sessions.status(task_id, owner)
+        if not owner or status is None or status.owner != owner:
+            raise SubagentControlError("task unavailable")
+        return status
+
+    def check(self, task_id: str, owner: str | None) -> SubagentStatus:
+        """Return detached status for one task owned by the caller's session."""
+        return deepcopy(self._owned_status(task_id, owner))
+
+    def accepts_result(self, msg: InboundMessage, owner: str) -> bool:
+        """Reject a completion whose owning child was removed after publication."""
+        task_id = msg.metadata.get("subagent_task_id")
+        if msg.sender_id != "subagent" or not isinstance(task_id, str) or self.sessions is None:
+            return True
+        return self.sessions.contains(task_id, owner)
+
+    def read_session(self, task_id: str, owner: str) -> tuple[SubagentStatus, Session]:
+        """Return task status and detached history through the ownership boundary."""
+        status = self.check(task_id, owner)
+        child = self.sessions.snapshot(task_id, owner) if self.sessions is not None else None
+        if child is None:
+            raise SubagentControlError("task unavailable")
+        return status, child
+
+    async def send(self, task_id: str, owner: str | None,
+             message: str | None) -> SubagentMessageReceipt:
+        """Accept a bounded follow-up only while execution is open."""
+        status = self._owned_status(task_id, owner)
+        if status.state not in {"queued", "running"}:
+            raise SubagentControlError("task is not accepting messages")
+        if not message or not message.strip() or len(message.encode("utf-8")) > self.MAX_MESSAGE_BYTES:
+            raise SubagentControlError("message must contain text and be at most 8192 UTF-8 bytes")
+        record = self._tasks[task_id]
+        if len(record.inbox) >= self.MAX_INBOX or len(status.receipts) >= self.MAX_MESSAGES:
+            raise SubagentControlError("task message capacity reached")
+        message_id = str(uuid.uuid4())
+        record.inbox.append((message_id, message))
+        status.receipts[message_id] = "accepted"
+        await self._save_status(status)
+        return {"task_id": task_id, "message_id": message_id,
+                "receipt": "accepted", "delivered": False}
+
+    async def cancel(self, task_id: str, owner: str | None) -> SubagentStatus:
+        """Stop an owned task and return its detached state after the bounded wait."""
+        status = self._owned_status(task_id, owner)
+        record = self._tasks.get(task_id)
+        if record is not None and record.status.finished_at is None:
+            await self._cancel_task(record)
+            status = record.status
+        return deepcopy(status)
+
+    async def _cancel_task(self, record: _SubagentTask,
+                           *, suppress_notice: bool = False) -> None:
+        record.suppress_notice |= suppress_notice
+        task_id = record.status.task_id
+        task = self._running_tasks.get(task_id)
+        if record.decide(_SubagentOutcome("cancelled", "Task cancelled.", "cancelled")):
+            await self._save_status(record.status)
+            if task is not None and record.begun and not task.done():
+                task.cancel()
+        if record.status.finished_at is None:
+            self._start_cleanup(record)
+        if task is not None:
+            # wait_for waits for cancellation acknowledgement and can hang here.
+            # Keep resistant work tracked, with its slot held, until it really exits.
+            await asyncio.wait({task}, timeout=self.CANCEL_WAIT_SECONDS)
 
     def runtime_statuses(self) -> Mapping[str, SubagentStatus]:
-        """Return the observable statuses of all active tasks."""
-        return self._task_statuses
+        """Return detached active and retained terminal data, never task resources."""
+        return {
+            **{tid: record.snapshot() for tid, record in self._tasks.items()
+               if record.status.finished_at is None},
+            **deepcopy(self._terminal_statuses),
+        }
 
-    def statuses_for_session(self, session_key: str | None) -> Mapping[str, SubagentStatus]:
+    def _runtime_statuses_for_session(self, session_key: str) -> dict[str, SubagentStatus]:
+        return {
+            **{tid: record.snapshot() for tid, record in self._tasks.items()
+               if record.status.owner == session_key and record.status.finished_at is None},
+            **{tid: deepcopy(status) for tid, status in self._terminal_statuses.items()
+               if status.owner == session_key},
+        }
+
+    def _merge_session_statuses(
+        self, session_key: str, runtime: Mapping[str, SubagentStatus], *, include_history: bool,
+    ) -> Mapping[str, SubagentStatus]:
+        if self.sessions is not None and not self.sessions.exists(session_key):
+            return {}
+        statuses = self.sessions.load(session_key) if include_history and self.sessions is not None else {}
+        for task_id, status in runtime.items():
+            if self.sessions is not None and not self.sessions.contains(task_id, session_key):
+                continue
+            persisted = statuses.get(task_id)
+            if persisted is None or status.revision >= persisted.revision:
+                statuses[task_id] = status
+        return statuses
+
+    def statuses_for_session(
+        self, session_key: str | None, *, include_history: bool = True,
+    ) -> Mapping[str, SubagentStatus]:
         """Return only tasks owned by the given session, never a global fallback."""
         if not session_key:
             return {}
-        task_ids = self._session_tasks.get(session_key, set())
-        return {
-            task_id: status
-            for task_id, status in self._task_statuses.items()
-            if task_id in task_ids
-        }
+        return self._merge_session_statuses(
+            session_key, self._runtime_statuses_for_session(session_key), include_history=include_history,
+        )
+
+    async def read_statuses_for_session(self, session_key: str) -> Mapping[str, SubagentStatus]:
+        """Capture runtime observations on the owner loop; read stored metadata on a worker."""
+        runtime = self._runtime_statuses_for_session(session_key)
+        return await asyncio.to_thread(
+            self._merge_session_statuses, session_key, runtime, include_history=True,
+        )
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
         """Update the deprecated runtime source used by legacy ``spawn`` calls."""
@@ -235,6 +529,7 @@ class SubagentManager:
         self,
         workspace: Path | None = None,
         tools_config: ToolsConfig | None = None,
+        exec_manager: ExecSessionManager | None = None,
         allowed_tools: set[str] | None = None,
     ) -> ToolRegistry:
         """Build an isolated subagent tool registry via ToolLoader."""
@@ -244,7 +539,7 @@ class SubagentManager:
         ctx = ToolContext(
             config=cfg,
             workspace=str(root.resolve()),
-            exec_session_manager=self._exec_session_manager,
+            exec_session_manager=exec_manager or self._exec_session_manager,
             file_state_store=FileStates(),
             workspace_sandbox=workspace_sandbox_status(
                 restrict_to_workspace=cfg.restrict_to_workspace,
@@ -253,6 +548,112 @@ class SubagentManager:
         )
         ToolLoader().load(ctx, registry, scope="subagent", allowed_tools=allowed_tools)
         return registry
+
+    async def _create_task(
+        self, task: str, label: str | None, origin_channel: str, origin_chat_id: str,
+        session_key: str | None, origin_message_id: str | None,
+        temperature: float | None, workspace_scope: WorkspaceScope | None,
+        runtime: LLMRuntime | None, *, announce: bool, origin_turn_id: str | None,
+        session_policy: SessionPolicy | None,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        skills: list[str] | None = None,
+    ) -> _SubagentTask:
+        if runtime is None:
+            runtime = self._compat_spawn_runtime()
+        if temperature is not None:
+            runtime = runtime.with_generation_overrides(temperature=temperature)
+        # A failed cleanup owns admission even after its status has been evicted.
+        if self._closed or len(self._tasks) + self._admitting >= self.MAX_ACTIVE:
+            raise SubagentControlError("subagent manager is closed or at task capacity")
+        owner = session_key or f"{origin_channel}:{origin_chat_id}"
+        task_id = str(uuid.uuid4())
+        status = SubagentStatus(
+            task_id=task_id,
+            revision=1,
+            label=label or task[:30] + ("..." if len(task) > 30 else ""),
+            task_description=task,
+            started_at=time.monotonic(),
+            owner=owner,
+            origin_message_id=origin_message_id,
+            origin_turn_id=origin_turn_id,
+        )
+        self._admitting += 1
+        try:
+            if self.sessions is not None:
+                admission = asyncio.create_task(self.sessions.create(status, policy=session_policy))
+                try:
+                    child = await shield_and_drain(admission)
+                except asyncio.CancelledError:
+                    if not admission.cancelled() and admission.exception() is None:
+                        child = admission.result()
+                        await shield_and_drain(self.sessions.sessions.state.delete(
+                            child.key, expected_generation=child.generation,
+                        ))
+                    raise
+            else:
+                child = Session(key=SubagentSessions.key(task_id), policy=session_policy or SessionPolicy())
+                child.add_message("user", task)
+        finally:
+            self._admitting -= 1
+        if self._closed:
+            if self.sessions is not None:
+                await self.sessions.sessions.state.delete(child.key, expected_generation=child.generation)
+            raise SubagentControlError("subagent manager is closed")
+        record = _SubagentTask(
+            status=status,
+            session=child,
+            runtime=runtime,
+            origin={
+                "channel": origin_channel, "chat_id": origin_chat_id,
+                "session_key": owner, "llm_usage_source": current_llm_usage_source(),
+            },
+            origin_message_id=origin_message_id,
+            workspace_scope=workspace_scope,
+            announce=announce,
+            system_prompt_override=system_prompt,
+            tools_filter=tools,
+            skills_filter=skills,
+        )
+        self._tasks[task_id] = record
+        self._publish_status(status)
+        execution = asyncio.create_task(self._run_subagent(record))
+        self._running_tasks[task_id] = execution
+        execution.add_done_callback(partial(self._task_done, record))
+        logger.info("Started subagent [{}]: {}", task_id,
+                    record.status.label if child.policy.log_content else "[content hidden]")
+        return record
+
+    def _override_runtime(
+        self, runtime: LLMRuntime | None, provider: str | None, model: str | None,
+    ) -> LLMRuntime | None:
+        """Fork: build an ephemeral runtime for a per-task provider/model override.
+
+        The inherited runtime keeps serving other tasks unchanged; its context
+        window is preserved. Validated before admission so the caller gets an
+        immediate error instead of a silent background failure.
+        """
+        if not (provider or model):
+            return runtime
+        if self._provider_factory is None:
+            raise SubagentControlError(
+                "provider/model override requires a configured provider factory"
+            )
+        if provider and self.available_providers and provider not in self.available_providers:
+            raise SubagentControlError(
+                f"unknown provider '{provider}'. "
+                f"Available: {', '.join(self.available_providers) or '(none)'}"
+            )
+        base = runtime if runtime is not None else self._compat_spawn_runtime()
+        ephemeral_provider, ephemeral_model = self._provider_factory(provider, model)
+        logger.info(
+            "Subagent using override: provider={} model={}",
+            provider or "(inherited)", ephemeral_model,
+        )
+        return LLMRuntime.capture(
+            ephemeral_provider, ephemeral_model,
+            context_window_tokens=base.context_window_tokens,
+        )
 
     async def spawn(
         self,
@@ -266,119 +667,32 @@ class SubagentManager:
         workspace_scope: WorkspaceScope | None = None,
         *,
         runtime: LLMRuntime | None = None,
+        origin_turn_id: str | None = None,
+        session_policy: SessionPolicy | None = None,
         provider: str | None = None,
         model: str | None = None,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         skills: list[str] | None = None,
     ) -> str:
-        """Spawn a subagent to execute a task in the background.
+        """Start background work and route its terminal result to the parent.
 
-        ``runtime`` is the inherited model runtime (provider + model +
-        generation settings) captured at turn admission. When omitted, a
-        deprecated compatibility runtime is derived from the constructor
-        provider/model.
-
-        ``provider`` / ``model`` override the inherited runtime just for this
-        subagent by building an ephemeral runtime via the provider factory.
-        Pass either, both, or neither. Validated up-front so the caller gets
-        an immediate error rather than a silent background failure.
-
-        ``system_prompt`` replaces the inherited full parent prompt
-        (AGENTS.md + skills + tool schemas + runtime context, ~10K tokens) with
-        a minimal user-supplied prompt. Use for lightweight tasks where the
-        subagent doesn't need the full instruction set.
-
-        ``tools`` whitelists the tools available to the subagent. None inherits
-        the full parent tool set (~5K tokens of tool-schema preamble per
-        spawn); a short list (e.g. ``["write_file"]``) drops the schema budget
-        to just the listed tools. Big input-token savings for fan-out where
-        each subagent only needs a couple of tools.
-
-        ``skills`` whitelists which skills appear in the subagent's system
-        prompt skills-summary block (~1500 tokens for a default workspace).
-        ``None`` inherits all skills; ``[]`` strips the skill block entirely;
-        a short list (e.g. ``["adhd"]``) keeps only the named skills. Ignored
-        when ``system_prompt`` is set (the caller's prompt replaces the whole
-        block anyway).
+        Fork: ``provider``/``model`` run this task on an ephemeral runtime built by
+        the provider factory; ``system_prompt`` replaces the generated subagent
+        prompt; ``tools``/``skills`` whitelist the tool registry / skill summary.
         """
-        if (provider or model) and self._provider_factory is None:
-            return (
-                "Cannot spawn subagent with provider/model override: "
-                "no provider_factory configured."
+        try:
+            runtime = self._override_runtime(runtime, provider, model)
+            record = await self._create_task(
+                task, label, origin_channel, origin_chat_id, session_key,
+                origin_message_id, temperature, workspace_scope, runtime, announce=True, origin_turn_id=origin_turn_id,
+                session_policy=session_policy,
+                system_prompt=system_prompt, tools=tools, skills=skills,
             )
-        if provider and self.available_providers and provider not in self.available_providers:
-            return (
-                f"Cannot spawn subagent: unknown provider '{provider}'. "
-                f"Available: {', '.join(self.available_providers) or '(none)'}."
-            )
-
-        if runtime is None:
-            runtime = self._compat_spawn_runtime()
-        # Per-spawn provider/model override: build an ephemeral runtime via the
-        # provider factory so the inherited runtime keeps serving other
-        # subagents unchanged. The inherited context window is preserved.
-        if (provider or model) and self._provider_factory is not None:
-            ephemeral_provider, ephemeral_model = self._provider_factory(provider, model)
-            runtime = LLMRuntime.capture(
-                ephemeral_provider,
-                ephemeral_model,
-                context_window_tokens=runtime.context_window_tokens,
-            )
-            logger.info(
-                "Subagent spawn using override: provider={} model={}",
-                provider or "(inherited)", ephemeral_model,
-            )
-        if temperature is not None:
-            runtime = runtime.with_generation_overrides(temperature=temperature)
-        task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin: _SubagentOrigin = {
-            "channel": origin_channel,
-            "chat_id": origin_chat_id,
-            "session_key": session_key,
-            "llm_usage_source": current_llm_usage_source(),
-        }
-
-        status = SubagentStatus(
-            task_id=task_id,
-            label=display_label,
-            task_description=task,
-            started_at=time.monotonic(),
-        )
-        self._task_statuses[task_id] = status
-
-        bg_task = asyncio.create_task(
-            self._run_subagent(
-                task_id,
-                task,
-                display_label,
-                origin,
-                status,
-                runtime,
-                origin_message_id,
-                workspace_scope,
-                system_prompt,
-                tools,
-                skills,
-            )
-        )
-        self._running_tasks[task_id] = bg_task
-        if session_key:
-            self._session_tasks.setdefault(session_key, set()).add(task_id)
-
-        def _cleanup(_: asyncio.Task[str]) -> None:
-            self._running_tasks.pop(task_id, None)
-            self._task_statuses.pop(task_id, None)
-            if session_key and (ids := self._session_tasks.get(session_key)):
-                ids.discard(task_id)
-                if not ids:
-                    del self._session_tasks[session_key]
-
-        bg_task.add_done_callback(_cleanup)
-
-        logger.info("Spawned subagent [{}]: {}", task_id, display_label)
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+        except SubagentControlError as exc:
+            return ToolResult.error(f"Error: {exc}")
+        status = record.status
+        return f"Subagent [{status.label}] started (id: {status.task_id}). I'll notify you when it completes."
 
     async def run_inline(
         self,
@@ -392,272 +706,261 @@ class SubagentManager:
         workspace_scope: WorkspaceScope | None = None,
         *,
         runtime: LLMRuntime | None = None,
+        origin_turn_id: str | None = None,
+        session_policy: SessionPolicy | None = None,
         provider: str | None = None,
         model: str | None = None,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         skills: list[str] | None = None,
     ) -> str:
-        """Run a subagent synchronously and return its result to the caller.
+        """Wait for the same task lifecycle without a background notice.
 
-        Accepts the same per-spawn overrides as ``spawn`` (provider/model,
-        system_prompt, tools, skills) so a blocking consultation can also run on
-        a cheaper model or with a trimmed tool/skill surface.
+        Fork: ``provider``/``model`` run this task on an ephemeral runtime built by
+        the provider factory; ``system_prompt`` replaces the generated subagent
+        prompt; ``tools``/``skills`` whitelist the tool registry / skill summary.
         """
-        if (provider or model) and self._provider_factory is None:
-            return ToolResult.error(
-                "Cannot run inline subagent with provider/model override: "
-                "no provider_factory configured."
-            )
-        if provider and self.available_providers and provider not in self.available_providers:
-            return ToolResult.error(
-                f"Cannot run inline subagent: unknown provider '{provider}'. "
-                f"Available: {', '.join(self.available_providers) or '(none)'}."
-            )
-
-        if runtime is None:
-            runtime = self._compat_spawn_runtime()
-        if (provider or model) and self._provider_factory is not None:
-            ephemeral_provider, ephemeral_model = self._provider_factory(provider, model)
-            runtime = LLMRuntime.capture(
-                ephemeral_provider,
-                ephemeral_model,
-                context_window_tokens=runtime.context_window_tokens,
-            )
-            logger.info(
-                "Inline subagent using override: provider={} model={}",
-                provider or "(inherited)", ephemeral_model,
-            )
-        if temperature is not None:
-            runtime = runtime.with_generation_overrides(temperature=temperature)
-        task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin: _SubagentOrigin = {
-            "channel": origin_channel,
-            "chat_id": origin_chat_id,
-            "session_key": session_key,
-            "llm_usage_source": current_llm_usage_source(),
-        }
-        status = SubagentStatus(
-            task_id=task_id,
-            label=display_label,
-            task_description=task,
-            started_at=time.monotonic(),
-        )
-        self._task_statuses[task_id] = status
-        logger.info("Running inline subagent [{}]: {}", task_id, display_label)
-        inline_task = asyncio.create_task(
-            self._run_subagent(
-                task_id,
-                task,
-                display_label,
-                origin,
-                status,
-                runtime,
-                origin_message_id,
-                workspace_scope,
-                system_prompt,
-                tools,
-                skills,
-                announce=False,
-            )
-        )
-        self._running_tasks[task_id] = inline_task
-        if session_key:
-            self._session_tasks.setdefault(session_key, set()).add(task_id)
         try:
-            result = await inline_task
-            if status.phase == "error" or status.stop_reason == "error":
-                return ToolResult.error(result)
-            return result
-        finally:
-            self._running_tasks.pop(task_id, None)
-            self._task_statuses.pop(task_id, None)
-            if session_key and (ids := self._session_tasks.get(session_key)):
-                ids.discard(task_id)
-                if not ids:
-                    del self._session_tasks[session_key]
-
-    async def _run_subagent(
-        self,
-        task_id: str,
-        task: str,
-        label: str,
-        origin: _SubagentOrigin,
-        status: SubagentStatus,
-        runtime: LLMRuntime,
-        origin_message_id: str | None = None,
-        workspace_scope: WorkspaceScope | None = None,
-        system_prompt_override: str | None = None,
-        tools_filter: list[str] | None = None,
-        skills_filter: list[str] | None = None,
-        *,
-        announce: bool = True,
-    ) -> str:
-        """Wait for capacity, then execute one subagent task."""
-        status.phase = "queued"
-        async with self._run_slots:
-            status.phase = "initializing"
-            return await self._run_admitted_subagent(
-                task_id,
-                task,
-                label,
-                origin,
-                status,
-                runtime,
-                origin_message_id,
-                workspace_scope,
-                system_prompt_override=system_prompt_override,
-                tools_filter=tools_filter,
-                skills_filter=skills_filter,
-                announce=announce,
+            runtime = self._override_runtime(runtime, provider, model)
+            record = await self._create_task(
+                task, label, origin_channel, origin_chat_id, session_key,
+                origin_message_id, temperature, workspace_scope, runtime, announce=False, origin_turn_id=origin_turn_id,
+                session_policy=session_policy,
+                system_prompt=system_prompt, tools=tools, skills=skills,
             )
+        except SubagentControlError as exc:
+            return ToolResult.error(f"Error: {exc}")
+        execution = self._running_tasks[record.status.task_id]
+        try:
+            result = await asyncio.shield(execution)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if execution.cancelled() and caller is not None and not caller.cancelling():
+                partial_result = record.status.result if record.status.partial else None
+                return ToolResult.error(
+                    "Task cancelled." + (f"\nPartial result:\n{partial_result}" if partial_result else "")
+                )
+            await self._cancel_task(record, suppress_notice=True)
+            raise
+        if record.status.state == "error":
+            error = record.status.error or result
+            return ToolResult.error(error + (f"\nPartial result:\n{result}" if error != result else ""))
+        if record.status.state == "incomplete":
+            return ToolResult.error(f"Task incomplete ({record.status.stop_reason}).\n{result}")
+        return result
 
-    async def _run_admitted_subagent(
-        self,
-        task_id: str,
-        task: str,
-        label: str,
-        origin: _SubagentOrigin,
-        status: SubagentStatus,
-        runtime: LLMRuntime,
-        origin_message_id: str | None = None,
-        workspace_scope: WorkspaceScope | None = None,
-        # Fork: per-subagent spawn knobs threaded through upstream's split _run.
-        system_prompt_override: str | None = None,
-        tools_filter: list[str] | None = None,
-        skills_filter: list[str] | None = None,
-        *,
-        announce: bool = True,
-    ) -> str:
-        """Execute the subagent task and announce the result."""
-        logger.info("Subagent [{}] starting task: {}", task_id, label)
+    def _task_done(self, record: _SubagentTask, task: asyncio.Task[str]) -> None:
+        self._running_tasks.pop(record.status.task_id, None)
+        error = None if task.cancelled() else task.exception()
+        if error is not None:
+            logger.error("Subagent [{}] failed: {}", record.status.task_id,
+                         error if record.session.policy.log_content else type(error).__name__)
+        if record.status.finished_at is None:
+            # An externally cancelled execution still owns cleanup and a terminal result.
+            record.decide(
+                _SubagentOutcome("error", f"Error: {error}", "error", str(error))
+                if error is not None
+                else _SubagentOutcome("cancelled", "Task cancelled.", "cancelled")
+            )
+            self._start_cleanup(record)
+            settlement = asyncio.create_task(self._settle_unfinished_task(record))
+            self._running_tasks[record.status.task_id] = settlement
+            settlement.add_done_callback(partial(self._task_done, record))
+        self._release_task(record)
+
+    async def _save_transcript(self, record: _SubagentTask) -> None:
+        if self.sessions is not None:
+            from nanobot.session.sqlite_store import SessionConflictError
+
+            try:
+                await self.sessions.sessions.state.finish_turn(record.session)
+            except SessionConflictError:
+                # A removed child must not be recreated by a late observation.
+                return
+
+    async def _settle_unfinished_task(self, record: _SubagentTask) -> str:
+        outcome = await self._finish(record)
+        return outcome.result
+
+    async def _run_subagent(self, record: _SubagentTask) -> str:
+        """Execute once, seal the outcome, then clean up and publish once."""
+        status = record.status
+        task_text, label = status.task_description, status.label
+        record.begun = True
+        try:
+            record.raise_if_stopping()
+            async with self._run_slots:
+                record.raise_if_stopping()
+                status.state = "running"
+                status.phase = "initializing"
+                await self._save_status(status)
+                outcome = await self._run_admitted_subagent(record)
+                record.decide(outcome)
+        except asyncio.CancelledError:
+            record.decide(_SubagentOutcome("cancelled", "Task cancelled.", "cancelled"))
+        except Exception as exc:
+            logger.opt(exception=record.session.policy.log_content).error("Subagent [{}] failed", status.task_id)
+            record.decide(_SubagentOutcome("error", f"Error: {exc}", "error", str(exc)))
+        cleanup_error = None
+        try:
+            await asyncio.shield(self._start_cleanup(record))
+        except Exception as exc:
+            logger.opt(exception=record.session.policy.log_content).error(
+                "Subagent [{}] exec cleanup failed", status.task_id,
+            )
+            cleanup_error = f"Error cleaning up task processes: {exc}"
+        outcome = await self._finish(record, cleanup_error)
+        if record.announce and not record.suppress_notice and not self._closed:
+            await self._announce_result(
+                status.task_id, label, task_text, outcome.result, record.origin,
+                "ok" if outcome.state == "done" else outcome.state, record.origin_message_id,
+                receipts=dict(status.receipts),
+                stop_reason=status.stop_reason, error=status.error, partial_result=status.partial,
+            )
+        if outcome.state == "cancelled":
+            raise asyncio.CancelledError
+        return outcome.result
+
+    async def _run_admitted_subagent(self, record: _SubagentTask) -> _SubagentOutcome:
+        """Execute the admitted task with task-owned shell resources."""
+        status, origin, runtime = record.status, record.origin, record.runtime
+        task_id, label = status.task_id, status.label
+        origin_message_id, workspace_scope = record.origin_message_id, record.workspace_scope
+        logger.info("Subagent [{}] starting task: {}", task_id,
+                    label if record.session.policy.log_content else "[content hidden]")
 
         async def _on_checkpoint(payload: dict[str, Any]) -> None:
-            status.phase = payload.get("phase", status.phase)
-            status.iteration = payload.get("iteration", status.iteration)
+            record.raise_if_stopping()
+            phase = payload.get("phase", status.phase)
+            iteration = payload.get("iteration", status.iteration)
+            if (phase, iteration) != (status.phase, status.iteration):
+                status.phase, status.iteration = phase, iteration
+                await self._save_status(status)
 
+        root = workspace_scope.project_path if workspace_scope is not None else self.workspace
+        cfg = None
+        if workspace_scope is not None:
+            cfg = self._subagent_tools_config()
+            cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
+        # Construct from the agent workspace; the bound scope below supplies the project cwd.
+        allowed_tools = set(record.tools_filter) if record.tools_filter is not None else None
+        if allowed_tools is not None:
+            logger.info("Subagent [{}] tool whitelist: {}", task_id, sorted(allowed_tools))
+        tools = self._build_tools(
+            tools_config=cfg, exec_manager=record.exec_manager, allowed_tools=allowed_tools,
+        )
+        if record.system_prompt_override is not None:
+            system_prompt = record.system_prompt_override
+            logger.info("Subagent [{}] using system_prompt override ({} chars)",
+                        task_id, len(record.system_prompt_override))
+        else:
+            system_prompt = self._build_subagent_prompt(
+                workspace=root, skills_filter=record.skills_filter,
+            )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            *record.session.get_history(),
+        ]
+        activity = SessionActivity()
+
+        async def save_observation(status: SubagentStatus) -> None:
+            record.session.messages = activity.transcript()
+            await self._save_transcript(record)
+            await self._save_status(status)
+
+        async def publish_activity(event: AgentEvent) -> None:
+            if activity.remember(event):
+                await save_observation(status)
+
+        events = EventSink(publish_activity)
+        hook = build_agent_turn_hook(AgentTurnHookSpec(
+            events=events,
+            streaming=True,
+            channel=origin["channel"],
+            chat_id=origin["chat_id"],
+            message_id=origin_message_id,
+            session_key=record.session.key,
+            workspace=root,
+            registered_hook_factories=[create_file_edit_activity_hook],
+            turn_hooks=[activity, _SubagentHook(
+                status, check_active=record.raise_if_stopping,
+                max_result_chars=self.max_tool_result_chars,
+                on_status=save_observation,
+            )],
+            ephemeral=not record.session.policy.persist,
+            run_extra_hooks_for_ephemeral=True,
+            log_content=record.session.policy.log_content,
+        ))
+
+        request_token = bind_request_context(RequestContext(
+            channel=origin["channel"],
+            chat_id=origin["chat_id"],
+            message_id=origin_message_id,
+            session_key=record.session.key,
+            runtime=runtime,
+            log_content=record.session.policy.log_content,
+            persist_session=record.session.policy.persist,
+        ))
+        token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
         try:
-            root = workspace_scope.project_path if workspace_scope is not None else self.workspace
-            cfg = None
-            if workspace_scope is not None:
-                cfg = self._subagent_tools_config()
-                cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
-            allowed_tools = set(tools_filter) if tools_filter is not None else None
-            if allowed_tools is not None:
-                logger.info(
-                    "Subagent [{}] tool whitelist: {}",
-                    task_id, sorted(allowed_tools),
-                )
-            # Construct from the agent workspace; the bound scope below supplies the project cwd.
-            tools = self._build_tools(tools_config=cfg, allowed_tools=allowed_tools)
-            if system_prompt_override is not None:
-                system_prompt = system_prompt_override
-                logger.info(
-                    "Subagent [{}] using system_prompt override ({} chars)",
-                    task_id, len(system_prompt_override),
-                )
-            else:
-                if skills_filter is not None:
-                    logger.info(
-                        "Subagent [{}] skill whitelist: {}",
-                        task_id, sorted(skills_filter) if skills_filter else "(none)",
-                    )
-                system_prompt = self._build_subagent_prompt(
-                    workspace=root, skills_filter=skills_filter,
-                )
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
-
-            sess_key = origin.get("session_key")
-            request_token = bind_request_context(RequestContext(
-                channel=origin["channel"],
-                chat_id=origin["chat_id"],
-                message_id=origin_message_id,
-                session_key=sess_key,
+            tool_definitions = tools.get_definitions()
+            consolidate_history = partial(
+                self.consolidator.summarize_transcript,
                 runtime=runtime,
+                session_key=record.session.key,
+                tools=tool_definitions,
+                persist=False,
+            )
+            consolidate_provider_compaction = partial(
+                self.consolidator.summarize_provider_compaction,
+                runtime=runtime,
+                session_key=record.session.key,
+                tools=tool_definitions,
+                persist=False,
+            )
+            result = await self.runner.run(AgentRunSpec(
+                initial_messages=messages,
+                tools=tools,
+                runtime=runtime,
+                max_iterations=self.max_iterations,
+                max_tool_result_chars=self.max_tool_result_chars,
+                hook=hook,
+                max_iterations_message="Task stopped at its iteration limit before producing a final response.",
+                finalize_on_max_iterations=False,
+                error_message=None,
+                checkpoint_callback=_on_checkpoint,
+                injection_callback=partial(self._drain_inbox, record),
+                session_key=record.session.key,
+                workspace=root if record.session.policy.persist else None,
+                llm_usage_source=origin.get(
+                    "llm_usage_source",
+                    current_llm_usage_source(),
+                ),
+                consolidate_history=consolidate_history,
+                consolidate_provider_compaction=consolidate_provider_compaction,
+                events=events,
             ))
-            token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
-            try:
-                tool_definitions = tools.get_definitions()
-                consolidate_history = partial(
-                    self.consolidator.summarize_transcript,
-                    runtime=runtime,
-                    session_key=f"subagent:{task_id}",
-                    tools=tool_definitions,
-                    persist=False,
-                )
-                consolidate_provider_compaction = partial(
-                    self.consolidator.summarize_provider_compaction,
-                    runtime=runtime,
-                    session_key=f"subagent:{task_id}",
-                    tools=tool_definitions,
-                    persist=False,
-                )
-                result = await self.runner.run(AgentRunSpec(
-                    initial_messages=messages,
-                    tools=tools,
-                    runtime=runtime,
-                    max_iterations=self.max_iterations,
-                    max_tool_result_chars=self.max_tool_result_chars,
-                    hook=_SubagentHook(task_id, status),
-                    max_iterations_message="Task completed but no final response was generated.",
-                    finalize_on_max_iterations=False,
-                    error_message=None,
-                    checkpoint_callback=_on_checkpoint,
-                    session_key=sess_key,
-                    workspace=root,
-                    llm_usage_source=origin.get(
-                        "llm_usage_source",
-                        current_llm_usage_source(),
-                    ),
-                    consolidate_history=consolidate_history,
-                    consolidate_provider_compaction=consolidate_provider_compaction,
-                ))
-            finally:
-                if token is not None:
-                    reset_workspace_scope(token)
-                reset_request_context(request_token)
-            status.phase = "done"
-            status.stop_reason = result.stop_reason
-
-            if result.stop_reason == "error":
-                final_result = result.error or "Error: subagent execution failed."
-                final_status = "error"
-            else:
-                final_result = result.final_content or "Task completed but no final response was generated."
-                final_status = "ok"
-                logger.info("Subagent [{}] completed successfully", task_id)
-            if announce:
-                await self._announce_result(
-                    task_id,
-                    label,
-                    task,
-                    final_result,
-                    origin,
-                    final_status,
-                    origin_message_id,
-                )
-            return final_result
-
-        except Exception as e:
-            status.phase = "error"
-            status.error = str(e)
-            logger.exception("Subagent [{}] failed", task_id)
-            final_result = f"Error: {e}"
-            if announce:
-                await self._announce_result(
-                    task_id,
-                    label,
-                    task,
-                    final_result,
-                    origin,
-                    "error",
-                    origin_message_id,
-                )
-            return final_result
+        finally:
+            if token is not None:
+                reset_workspace_scope(token)
+            reset_request_context(request_token)
+        status.usage = result.usage
+        if result.messages:
+            record.session.messages = activity.transcript(result.messages)
+        record.session.provider_state = result.provider_state
+        checkpoint = result.summary_checkpoint
+        if checkpoint is not None:
+            boundary = checkpoint.transcript_boundary
+            if 0 <= boundary <= len(result.messages):
+                insert_at = sum(message.get("role") != "system" for message in result.messages[:boundary])
+                record.session.commit_summary_checkpoint(checkpoint.summary, insert_at=insert_at)
+        if result.stop_reason in {"error", "empty_final_response"}:
+            final_result = result.error or "Error: subagent execution failed."
+            return _SubagentOutcome("error", final_result, result.stop_reason, result.error)
+        if result.stop_reason == "max_iterations":
+            return _SubagentOutcome("incomplete", result.final_content or "Iteration limit reached.", result.stop_reason)
+        final_result = result.final_content or "Task completed but no final response was generated."
+        return _SubagentOutcome("done", final_result, result.stop_reason, result.error)
 
     async def _announce_result(
         self,
@@ -668,9 +971,17 @@ class SubagentManager:
         origin: _SubagentOrigin,
         status: str,
         origin_message_id: str | None = None,
+        *,
+        receipts: dict[str, str] | None = None,
+        stop_reason: str | None = None,
+        error: str | None = None,
+        partial_result: bool = False,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
-        status_text = "completed successfully" if status == "ok" else "failed"
+        status_text = {
+            "ok": "completed successfully", "cancelled": "was cancelled",
+            "incomplete": "stopped before completing the task",
+        }.get(status, "failed")
 
         announce_content = render_template(
             "agent/subagent_announce.md",
@@ -678,6 +989,9 @@ class SubagentManager:
             status_text=status_text,
             task=task,
             result=result,
+            stop_reason=stop_reason,
+            error=error,
+            partial_result=partial_result,
         )
 
         # Inject as system message to trigger main agent.
@@ -686,10 +1000,20 @@ class SubagentManager:
         # routed to the correct pending queue (mid-turn injection) instead of
         # being dispatched as a competing independent task.
         override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
+        if self.sessions is not None and (
+            not self.sessions.exists(override) or not self.sessions.contains(task_id, override)
+        ):
+            return
         metadata: dict[str, Any] = {
             "injected_event": "subagent_result",
             "subagent_task_id": task_id,
+            "subagent_state": "done" if status == "ok" else status,
+            "subagent_stop_reason": stop_reason,
+            "subagent_partial": partial_result,
         }
+        metadata["subagent_message_receipts"] = receipts or {}
+        if receipts:
+            announce_content += "\nMessage receipts: " + json.dumps(receipts)
         if origin_message_id:
             metadata["origin_message_id"] = origin_message_id
         msg = InboundMessage(
@@ -698,6 +1022,7 @@ class SubagentManager:
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
             session_key_override=override,
+            require_existing_session=True,
             metadata=metadata,
         )
 
@@ -711,30 +1036,23 @@ class SubagentManager:
     ) -> str:
         """Build a focused system prompt for the subagent.
 
-        ``skills_filter`` whitelists which skills are listed in the prompt's
-        skills summary. ``None`` includes every available skill (default).
-        ``[]`` includes no skills at all (useful for tight token budgets).
-        A non-empty list includes only the named skills.
+        Fork: ``skills_filter`` whitelists the skills summary — ``None`` lists every
+        skill, ``[]`` none, a non-empty list only the named skills.
         """
         from nanobot.agent.skills import SkillsLoader
 
         agent_workspace = self.workspace.expanduser().resolve()
         project_workspace = workspace.expanduser().resolve() if workspace else agent_workspace
-        # Fork: skills_filter whitelists which skills appear in the summary
-        # (per-subagent spawn knob). Compose it with upstream's project-workspace
-        # display-path threading.
         loader = SkillsLoader(self.workspace, disabled_skills=self.disabled_skills)
         if skills_filter is None:
             skills_summary = loader.build_skills_summary(workspace=project_workspace)
         elif not skills_filter:
             skills_summary = ""
         else:
-            # Exclude everything except the whitelisted skill names.
             allowed = set(skills_filter)
             all_names = {s["name"] for s in loader.list_skills(filter_unavailable=False)}
             skills_summary = loader.build_skills_summary(
-                exclude=all_names - allowed,
-                workspace=project_workspace,
+                exclude=all_names - allowed, workspace=project_workspace,
             )
         history_log = (
             str(agent_workspace / "memory" / "history.jsonl")
@@ -751,23 +1069,35 @@ class SubagentManager:
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""
-        tasks = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
-                 if tid in self._running_tasks and not self._running_tasks[tid].done()]
-        for t in tasks:
-            t.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self._exec_session_manager.terminate_by_owner(session_key)
-        return len(tasks)
+        records = [record for tid, record in self._tasks.items()
+                   if record.status.owner == session_key
+                   and tid in self._running_tasks and not self._running_tasks[tid].done()]
+        # Suppress every notice before cancellation can yield to a sibling.
+        for record in records:
+            record.suppress_notice = True
+        await asyncio.gather(*(self._cancel_task(record, suppress_notice=True) for record in records))
+        return len(records)
 
     async def close(self) -> None:
-        """Cancel running subagents and close their shared exec sessions."""
-        tasks = [task for task in self._running_tasks.values() if not task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self._exec_session_manager.close_all()
+        """Request cancellation and bounded cleanup, retaining unfinished work."""
+        self._closed = True
+        await asyncio.gather(*(self._cancel_task(self._tasks[tid], suppress_notice=True)
+                               for tid in list(self._running_tasks)))
+        cleanups: set[asyncio.Task[int]] = set()
+        for record in list(self._tasks.values()):
+            cleanup = record.cleanup_task
+            retry = cleanup is not None and cleanup.done() and (
+                cleanup.cancelled() or cleanup.exception() is not None
+            )
+            cleanups.add(self._start_cleanup(record, retry=retry))
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._exec_session_manager.close_all())
+        cleanups.add(self._close_task)
+        done, _ = await asyncio.wait(cleanups, timeout=self.CANCEL_WAIT_SECONDS)
+        for task in done:
+            task.result()
+        if self._tasks:
+            logger.warning("Subagent shutdown returned with tasks or cleanup still pending")
 
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
@@ -775,8 +1105,7 @@ class SubagentManager:
 
     def get_running_count_by_session(self, session_key: str) -> int:
         """Return the number of currently running subagents for a session."""
-        tids = self._session_tasks.get(session_key, set())
         return sum(
-            1 for tid in tids
-            if tid in self._running_tasks and not self._running_tasks[tid].done()
+            1 for tid, task in self._running_tasks.items()
+            if self._tasks[tid].status.owner == session_key and not task.done()
         )
