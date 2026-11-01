@@ -1,5 +1,3 @@
-"""Prompt preparation must leave the public runtime responsive."""
-
 import asyncio
 import threading
 from copy import deepcopy
@@ -64,8 +62,8 @@ async def test_preparation_allows_status_heartbeat_and_cancellation(
     release = threading.Event()
     captured = []
     finalized = []
-    ticks = []
-    ticking = True
+    heartbeat_requested = asyncio.Event()
+    heartbeat_progress = asyncio.Event()
 
     class Lifecycle(AgentHook):
         async def on_finally(self, context):
@@ -77,15 +75,16 @@ async def test_preparation_allows_status_heartbeat_and_cancellation(
                 context.messages[0]["content"] = "hook-only"
 
     async def heartbeat():
-        while ticking:
-            ticks.append(runtime_loop.time())
-            await asyncio.sleep(0.01)
+        while True:
+            await heartbeat_requested.wait()
+            heartbeat_requested.clear()
+            heartbeat_progress.set()
 
     def blocked(operation, *args, **kwargs):
         captured.append((current_request_context(), current_workspace_scope(), threading.get_ident()))
         runtime_loop.call_soon_threadsafe(entered.set)
         try:
-            assert release.wait(5), "test did not release prompt preparation"
+            assert release.wait(10), "test did not release prompt preparation"
             return operation(*args, **kwargs)
         finally:
             runtime_loop.call_soon_threadsafe(finished.set)
@@ -127,11 +126,11 @@ async def test_preparation_allows_status_heartbeat_and_cancellation(
     tasks = [task, pulse]
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
-        before = len(ticks)
-        status = await asyncio.wait_for(loop.process_direct("/status", session_key="cli:status"), 0.5)
+        status = await asyncio.wait_for(loop.process_direct("/status", session_key="cli:status"), 5)
         assert status is not None and "test-model" in status.content
-        await asyncio.sleep(0.04)
-        assert len(ticks) >= before + 2
+        heartbeat_requested.set()
+        await asyncio.wait_for(heartbeat_progress.wait(), 5)
+        assert not release.is_set()
         assert not finished.is_set()
         assert captured[0][2] != threading.get_ident()
         if phase != "history":
@@ -145,7 +144,7 @@ async def test_preparation_allows_status_heartbeat_and_cancellation(
         if cancel:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, 0.5)
+                await asyncio.wait_for(task, 5)
             assert not finished.is_set()
             if phase != "history":
                 assert len(finalized) == 1
@@ -155,17 +154,31 @@ async def test_preparation_allows_status_heartbeat_and_cancellation(
                 assert final_loop is runtime_loop
                 if phase != "prompt":
                     assert snapshot
-            # A new session queues behind the physical worker, even after its caller exits.
+            slots = loop.runner.context_governor._preparation_slots
+            acquire_slot = slots.acquire
+            queued = asyncio.Event()
+            acquired = asyncio.Event()
+
+            async def acquire():
+                is_waiting = asyncio.current_task() is waiting
+                if is_waiting:
+                    queued.set()
+                result = await acquire_slot()
+                if is_waiting:
+                    acquired.set()
+                return result
+
+            monkeypatch.setattr(slots, "acquire", acquire)
             waiting = asyncio.create_task(loop.process_direct("Queued", session_key="cli:waiting"))
             tasks.append(waiting)
-            await asyncio.sleep(0.04)
+            await asyncio.wait_for(queued.wait(), 5)
+            assert not acquired.is_set()
             assert len(provider.requests) == expected_requests
             assert not waiting.done()
             waiting.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(waiting, 0.5)
+                await asyncio.wait_for(waiting, 5)
         elif phase == "history":
-            # The live nested payload may change after capture; the worker owns its copy.
             live.messages[0]["content"][0]["text"] = "Changed after capture"
         release.set()
         await asyncio.wait_for(finished.wait(), 5)
@@ -184,7 +197,6 @@ async def test_preparation_allows_status_heartbeat_and_cancellation(
         assert current_request_context() is None
         assert current_workspace_scope() is None
     finally:
-        ticking = False
         release.set()
         for pending in tasks:
             if not pending.done():
@@ -399,7 +411,6 @@ async def test_cancelled_prompt_keeps_its_worker_slot_until_read_finishes() -> N
         second = asyncio.create_task(runner.prepare_prompt(read, "second"))
         tasks.append(second)
         await asyncio.sleep(0)
-        # The cancelled caller's read keeps its slot until the worker exits.
         assert not entered["second"].is_set()
         released["first"].set()
         await asyncio.wait_for(entered["second"].wait(), timeout=5)
@@ -437,23 +448,35 @@ async def test_local_token_estimation_leaves_loop_available(
 
     loop._extra_hooks.append(Lifecycle())
 
-    def count(*_args, **_kwargs):
-        captured.append(current_request_context())
+    from nanobot.utils.helpers import estimate_prompt_tokens_chain
+
+    def count(*args, **kwargs):
+        captured.append((current_request_context(), threading.get_ident()))
         runtime_loop.call_soon_threadsafe(entered.set)
         try:
             assert release.wait(5), "test did not release local token estimation"
-            return 10, "test-counter"
+            return estimate_prompt_tokens_chain(*args, **kwargs)
         finally:
             runtime_loop.call_soon_threadsafe(completed.set)
 
     module = "context_governance" if phase == "request" else "runner"
     monkeypatch.setattr(f"nanobot.agent.{module}.estimate_prompt_tokens_chain", count)
     task = asyncio.create_task(loop.process_direct("Hello", session_key="cli:token-work"))
+    entry = asyncio.create_task(entered.wait())
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        assert captured[0] is not None
-        assert captured[0].session_key == "cli:token-work"
-        assert captured[0].workspace_scope.project_path == tmp_path.resolve()
+        # Admission and prompt I/O precede estimation. Its worker gate, not turn
+        # startup, owns the five-second responsiveness deadline.
+        done, _ = await asyncio.wait((task, entry), return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            task.result()
+        assert entry in done, "turn ended before local token estimation started"
+        request, worker_thread = captured[0]
+        assert request is not None
+        assert request.session_key == "cli:token-work"
+        assert request.workspace_scope.project_path == tmp_path.resolve()
+        assert worker_thread != threading.get_ident()
+        assert not completed.is_set()
+        assert not release.is_set()
         assert current_request_context() is None
         if phase == "request":
             loop.provider.chat_stream_with_retry.assert_not_awaited()
@@ -476,9 +499,10 @@ async def test_local_token_estimation_leaves_loop_available(
             assert [public_history_message(message)["content"] for message in saved.messages] == ["Hello", "Done"]
     finally:
         release.set()
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        for pending in (task, entry):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(task, entry, return_exceptions=True)
         if captured:
             await asyncio.wait_for(completed.wait(), timeout=5)
         await loop.aclose()

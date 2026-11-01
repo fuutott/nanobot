@@ -18,7 +18,7 @@ RUN mkdir -p /app/nanobot/web && npm run build
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates git bubblewrap openssh-client libmagic1 tmux procps iputils-ping dnsutils && \
+    apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap openssh-client libmagic1 tmux procps iputils-ping dnsutils && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -41,7 +41,6 @@ RUN set -- && \
     done && \
     uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache -r pyproject.toml "$@"
 
-# Copy the full source and install
 COPY README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
 COPY docs/ docs/
 COPY nanobot/ nanobot/

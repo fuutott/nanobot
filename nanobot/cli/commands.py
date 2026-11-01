@@ -1,5 +1,3 @@
-"""CLI commands for nanobot."""
-
 # pyright: reportConstantRedefinition=false, reportMissingTypeStubs=false, reportPrivateUsage=false, reportUnusedFunction=false, reportUnusedImport=false
 
 import asyncio
@@ -9,11 +7,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
-# Force UTF-8 encoding for Windows console
 if sys.platform == "win32":
     if sys.stdout.encoding != "utf-8":
         os.environ["PYTHONIOENCODING"] = "utf-8"
-        # Re-open stdout/stderr with UTF-8 encoding
         with suppress(Exception):
             for stream in (sys.stdout, sys.stderr):
                 reconfigure = getattr(stream, "reconfigure", None)
@@ -27,7 +23,6 @@ from typer.core import TyperGroup  # noqa: E402
 
 from nanobot.utils.log_config import configure_console_logging  # noqa: E402
 
-# Remove default handler and re-add with unified nanobot format
 _log_handler_id = configure_console_logging(sys.stderr)
 
 
@@ -58,6 +53,7 @@ from nanobot.cli.runtime_config import (  # noqa: E402
     _print_model_setup_steps,
     _provider_setup_error,
 )
+from nanobot.cli.update import update  # noqa: E402
 from nanobot.cli.webui import webui  # noqa: E402
 from nanobot.cli.webui_support import (  # noqa: E402
     _prepare_webui_bundle_for_gateway,
@@ -97,8 +93,8 @@ app = typer.Typer(
 )
 
 console = Console()
+app.command()(update)
 
-# Server-console pairing stays outside the agent/gateway lifecycle.
 from nanobot.cli.remote import app as remote_app  # noqa: E402
 
 app.add_typer(remote_app, name="remote")
@@ -145,11 +141,6 @@ def main(
         _run_agent([], prog_name="nanobot")
 
 
-# ============================================================================
-# Onboard / Setup
-# ============================================================================
-
-
 @app.command()
 def onboard(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
@@ -175,7 +166,6 @@ def onboard(
         return loaded
 
     loaded_config: Config | None = None
-    # Create or update config
     if config_path.exists():
         if wizard:
             loaded_config = _apply_workspace_override(load_config(config_path))
@@ -211,7 +201,6 @@ def onboard(
 
     assert loaded_config is not None
 
-    # Run interactive wizard if enabled
     if wizard:
         from nanobot.cli.onboard import run_onboard
 
@@ -230,7 +219,6 @@ def onboard(
             raise typer.Exit(1)
     _onboard_plugins(config_path)
 
-    # Create workspace, preferring the configured workspace path.
     workspace_path = get_workspace_path(loaded_config.workspace_path)
     if not workspace_path.exists():
         workspace_path.mkdir(parents=True, exist_ok=True)
@@ -246,7 +234,6 @@ def onboard(
 
 
 def _onboard_plugins(config_path: Path) -> None:
-    """Inject default config for all discovered channels (built-in + plugins)."""
     import json
 
     from nanobot.channels.contracts import channel_default_config
@@ -305,7 +292,6 @@ def _print_enable_options(
 
 
 def _read_trigger_cli_message(message: str | None) -> str:
-    """Read a trigger message from an argument or stdin."""
     if message and message.strip():
         return message
     try:
@@ -346,11 +332,6 @@ def trigger(
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
     console.print(f"[green]Queued[/green] {delivery.trigger_id} ({delivery.id})")
-
-
-# ============================================================================
-# OpenAI-Compatible API Server
-# ============================================================================
 
 
 @app.command()
@@ -394,9 +375,17 @@ def serve(
     tools = ToolRegistry()
     register_image_generation_tool(runtime_config, tools, workspace=runtime_config.workspace_path)
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
+    from nanobot.providers.factory import build_unconfigured_provider_snapshot
+
+    setup_error = _provider_setup_error(runtime_config)
+    unconfigured_provider = (
+        build_unconfigured_provider_snapshot(runtime_config, setup_error).provider
+        if setup_error else None
+    )
     try:
         agent_loop = AgentLoop.from_config(
             runtime_config, bus,
+            provider=unconfigured_provider,
             session_manager=session_manager,
             hook_factories=[create_file_edit_activity_hook],
             tool_registry=tools,
@@ -442,16 +431,7 @@ def serve(
     web.run_app(api_app, host=host, port=port, print=_log_aiohttp)
 
 
-# ============================================================================
-# WebUI Launcher
-# ============================================================================
-
 app.command(name="webui")(webui)
-
-
-# ============================================================================
-# Gateway / Server
-# ============================================================================
 
 
 app.add_typer(
@@ -470,17 +450,7 @@ app.add_typer(
 )
 
 
-# ============================================================================
-# Agent Commands
-# ============================================================================
-
-
 app.command(name="agent")(agent)
-
-
-# ============================================================================
-# Channel Commands
-# ============================================================================
 
 
 channels_app = typer.Typer(help="Manage channels")
@@ -529,7 +499,6 @@ def channels_login(
     _, loaded = _load_inspection_config(config=config)
     channel_cfg: Any = getattr(loaded.channels, channel_name, None) or {}
 
-    # Validate channel exists
     all_channels = discover_all()
     if channel_name not in all_channels:
         available = ", ".join(all_channels.keys())
@@ -546,10 +515,6 @@ def channels_login(
     if not success:
         raise typer.Exit(1)
 
-
-# ============================================================================
-# Plugin Commands
-# ============================================================================
 
 plugins_app = typer.Typer(help="Manage optional nanobot features")
 app.add_typer(plugins_app, name="plugins")
@@ -626,11 +591,6 @@ def plugins_disable(
     console.print(f"[green]{escape(message)}[/green] in {resolved_config_path}")
 
 
-# ============================================================================
-# Status Commands
-# ============================================================================
-
-
 @app.command()
 def status(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
@@ -675,7 +635,6 @@ def status(
                 provider_ready = True
                 console.print("Agent: [green]✓ provider/model configuration is ready[/green]")
 
-        # Check API keys from registry
         for spec in PROVIDERS:
             p = getattr(loaded.providers, spec.name, None)
             if p is None:
@@ -683,7 +642,6 @@ def status(
             if spec.is_oauth:
                 console.print(f"{spec.label}: [green]✓ (OAuth)[/green]")
             elif spec.is_local:
-                # Local deployments show api_base instead of api_key
                 if resolve_env_refs(p.api_base or ""):
                     console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
                 else:
@@ -703,10 +661,6 @@ def status(
         console.print("Create the provider/model configuration:")
         _print_model_setup_steps(config_path)
 
-
-# ============================================================================
-# OAuth Login
-# ============================================================================
 
 app.add_typer(provider_app, name="provider")
 

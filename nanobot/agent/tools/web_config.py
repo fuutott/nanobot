@@ -1,5 +1,3 @@
-"""Web configuration shared by search/fetch tools and the root schema."""
-
 from pydantic import AliasChoices, Field
 
 from nanobot.config_base import Base
@@ -23,7 +21,7 @@ class WebToolsConfig(Base):
     """Web tools configuration."""
     # Fork: accept `enabled` as an alias for backward compatibility with older configs.
     enable: bool = Field(default=True, validation_alias=AliasChoices("enable", "enabled"))
-    proxy: str | None = None
+    use_proxy: bool = False
     user_agent: str | None = None
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
     fetch: WebFetchConfig = Field(default_factory=WebFetchConfig)
