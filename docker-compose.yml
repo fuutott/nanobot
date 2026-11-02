@@ -13,18 +13,23 @@ x-common-config: &common-config
     - ~/.nanobot/oauth-cli-kit:/home/nanobottie/.local/share/oauth-cli-kit
   cap_drop:
     - ALL
-  # Fork: SYS_ADMIN + unconfined apparmor/seccomp are required for the
-  # bubblewrap exec sandbox. Upstream hardened its default compose (CHOWN/SETGID/
-  # SETUID caps + no-new-privileges:true for its root-start entrypoint that
-  # chowns bind mounts then drops to the nanobot user). That model is
-  # incompatible with bwrap (no-new-privileges blocks the sandbox), and our fork
-  # runs as nanobottie via direct USER (already non-root), so we keep the
-  # sandbox-friendly caps instead.
+  # Fork: SYS_ADMIN is required for the bubblewrap exec sandbox (Docker's
+  # seccomp profile only allows unshare/clone namespaces/mount/setns with it).
+  # bwrap also needs pivot_root, which Docker's default profile denies even
+  # with SYS_ADMIN, so seccomp-bwrap.json = moby's default profile (docker-
+  # v29.9.2, moby/profiles v0.2.4) plus one rule: pivot_root when the container
+  # has CAP_SYS_ADMIN. Seccomp stays on. no-new-privileges does not block the
+  # non-setuid Debian bwrap, so it is back on too. No apparmor line: Docker
+  # Desktop/WSL2 has no AppArmor (on an AppArmor Linux host, docker-default
+  # denies mount: add apparmor=unconfined back there). Tested 2026-11-02 on
+  # Docker Desktop 4.97 / engine 29.9.2.
+  # Runs as nanobottie via USER (non-root), unlike upstream's root-start
+  # entrypoint with CHOWN/SETGID/SETUID.
   cap_add:
     - SYS_ADMIN
   security_opt:
-    - apparmor=unconfined
-    - seccomp=unconfined
+    - seccomp=./seccomp-bwrap.json
+    - no-new-privileges:true
   logging:
     driver: "json-file"
     options:

@@ -7,6 +7,14 @@ services:
     image: nanobot
     command: ["gateway"]
     restart: unless-stopped
+    # bwrap exec sandbox: see the comment in docker-compose.yml.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=./seccomp-bwrap.json
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:
