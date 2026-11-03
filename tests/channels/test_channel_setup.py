@@ -67,6 +67,19 @@ INTERNAL_CHANNEL_FIELDS = {
         "unixSocketPath",
         "websocketRequiresToken",
     },
+    # Fork channels are configured via config.json only (settings_visible=False).
+    "openaiapi": {"allowFrom", "apiKeys", "host", "port", "requestTimeoutSeconds"},
+    "mcpserver": {
+        "allowFrom",
+        "allowedOrigins",
+        "apiKeys",
+        "defaultProtocolVersion",
+        "enableResumption",
+        "host",
+        "port",
+        "requestTimeoutSeconds",
+        "sessionTtlSeconds",
+    },
 }
 
 

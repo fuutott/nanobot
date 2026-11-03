@@ -44,7 +44,7 @@ def _add_plugin_path(path: Path) -> None:
 
 # Fork-only: the plugin channels live outside the nanobot package, so their
 # tests need the plugin source roots importable.
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parent
 _add_plugin_path(_ROOT / "plugins" / "nanobot-channel-openaiapi")
 _add_plugin_path(_ROOT / "plugins" / "nanobot-channel-mcpserver")
 
