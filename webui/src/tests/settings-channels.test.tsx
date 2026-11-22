@@ -406,11 +406,12 @@ describe("Settings channels", () => {
     expect(await screen.findByRole("button", { name: "View Enabled channel settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View Enabled dependency channel settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "View Disabled channel settings" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Enabled" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("switch", { name: "Enabled only" })).toBeChecked();
     expect(screen.queryByText("No installation needed")).not.toBeInTheDocument();
     expect(screen.queryByText("Requires dependencies")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    await userEvent.click(screen.getByRole("switch", { name: "Enabled only" }));
+    expect(screen.getByRole("switch", { name: "Enabled only" })).not.toBeChecked();
     expect(screen.getByRole("button", { name: "View Disabled channel settings" })).toBeInTheDocument();
   });
 
@@ -430,7 +431,7 @@ describe("Settings channels", () => {
 
     expect(await screen.findByRole("button", { name: "View First channel settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View Second channel settings" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("switch", { name: "Enabled only" })).not.toBeChecked();
   });
 
   it("shows all channels by default when only the always-enabled WebUI is enabled", async () => {
@@ -453,7 +454,7 @@ describe("Settings channels", () => {
 
     expect(await screen.findByText("nanobot WebUI")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View Disabled channel settings" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("switch", { name: "Enabled only" })).not.toBeChecked();
   });
 
   it("replaces the installed channel switch with an in-row restart action", async () => {
@@ -644,6 +645,32 @@ describe("Settings channels", () => {
     },
   );
 
+  it.each([true, false])("turns off failed WeChat from the channel list (support installed: %s)", async (installed) => {
+    const feature: NanobotFeatureInfo = {
+      ...uninstalledConnectFeature("weixin"), installed, configured: true, enabled: true,
+      runtime_status: "failed", status: "failed",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/settings") return jsonResponse(settingsPayload());
+      if (String(input) === "/api/settings/nanobot-features") return jsonResponse({ features: [feature], enabled_count: 0 });
+      return jsonResponse({});
+    }));
+    requestMutationMock.mockResolvedValueOnce({
+      features: [{ ...feature, enabled: false, runtime_status: "stopped", status: "stopped" }], enabled_count: 0,
+    });
+
+    renderSettingsView({ initialSection: "channels" });
+    expect(await screen.findByText("Failed")).toBeVisible();
+    const toggle = screen.getByRole("switch", { name: "WeChat channel" });
+    expect(toggle).toBeChecked();
+    await userEvent.click(toggle);
+    expect(requestMutationMock).toHaveBeenCalledTimes(1);
+    expect(requestMutationMock).toHaveBeenCalledWith(
+      "settings.feature.disable", { name: "weixin" }, expect.any(Number),
+    );
+    await waitFor(() => expect(screen.queryByRole("button", { name: "View WeChat settings" })).not.toBeInTheDocument());
+  });
+
   it("keeps WeChat login recovery visible across transient channel refreshes", async () => {
     const expiredFeature: NanobotFeatureInfo = {
       name: "weixin",
@@ -807,7 +834,7 @@ describe("Settings channels", () => {
     renderSettingsView({ initialSection: "channels" });
 
     expect((await screen.findAllByText("Failed")).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("switch", { name: "Matrix channel" })).not.toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Matrix channel" })).toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Install Matrix" }));
 
     await waitFor(() =>
@@ -857,10 +884,7 @@ describe("Settings channels", () => {
     fireEvent.click(await screen.findByRole("button", { name: "View Matrix settings" }));
     expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
     expect(screen.getByText(runtimeError)).toBeInTheDocument();
-    expect(screen.getByLabelText("Matrix channel")).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
+    expect(screen.getByRole("switch", { name: "Enable channel" })).toBeChecked();
   });
 
   it("starts Feishu connect in WebUI instead of showing a CLI command", async () => {
@@ -1428,10 +1452,7 @@ describe("Settings channels", () => {
     fireEvent.click((await screen.findAllByRole("button", { name: /^View .+ settings$/ }))[0]);
     expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
     expect(screen.getByText(runtimeError)).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "test assistant" })).toHaveAttribute(
-      "aria-checked",
-      "false",
-    );
+    expect(screen.getByRole("switch", { name: "test assistant" })).toBeChecked();
   });
 
   it("preserves advanced field edits when collapsed and reopened with the keyboard", async () => {
@@ -1842,6 +1863,11 @@ describe("Settings channels", () => {
       }),
       150_000,
     ));
+    const savedValues = requestMutationMock.mock.calls.find(
+      ([action]) => action === "settings.channel.configure",
+    )?.[1].values;
+    expect(savedValues).not.toHaveProperty(["channels.email.imapPassword"]);
+    expect(savedValues).not.toHaveProperty(["channels.email.smtpPassword"]);
     expect(within(dialog).getByText("Saving")).toBeVisible();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
@@ -1989,7 +2015,7 @@ describe("Settings channels", () => {
     expect(screen.getByLabelText("Discord channel")).toBeEnabled();
     const savedSecret = screen.getByPlaceholderText("Saved secret");
     expect(savedSecret).toHaveValue("");
-    expect(savedSecret).toHaveAttribute("autocomplete", "off");
+    expect(savedSecret).toHaveAttribute("autocomplete", "new-password");
     expect(savedSecret.closest("form")).not.toBeNull();
     expect(screen.queryByDisplayValue("discord-secret-token")).not.toBeInTheDocument();
 

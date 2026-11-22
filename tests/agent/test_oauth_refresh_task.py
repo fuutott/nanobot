@@ -43,10 +43,13 @@ async def test_oauth_refresh_task_scheduled_for_server_with_auth(tmp_path):
 
     loop._start_oauth_refresh_task()
 
-    assert len(loop._background_tasks) == 1
-    for task in list(loop._background_tasks):
-        task.cancel()
-    await asyncio.gather(*loop._background_tasks, return_exceptions=True)
+    task = loop._oauth_refresh_task
+    assert task is not None
+    # The refresher runs for the loop's lifetime, so it must not count as
+    # drained background work (that would block maintenance() forever).
+    assert not loop._has_pending_work()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -58,7 +61,7 @@ async def test_oauth_refresh_task_skipped_without_auth(tmp_path):
 
     loop._start_oauth_refresh_task()
 
-    assert loop._background_tasks == set()
+    assert loop._oauth_refresh_task is None
 
 
 @pytest.mark.asyncio
@@ -67,4 +70,4 @@ async def test_oauth_refresh_task_skipped_without_servers(tmp_path):
 
     loop._start_oauth_refresh_task()
 
-    assert loop._background_tasks == set()
+    assert loop._oauth_refresh_task is None

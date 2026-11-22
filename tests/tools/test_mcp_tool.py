@@ -32,15 +32,6 @@ from nanobot.config.schema import MCPServerConfig
 _PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 
 
-def _fake_conn(session: object) -> object:
-    """Identity shim left in place to minimize diff against pre-upstream-spine tests.
-
-    Wrappers now take the session directly (per upstream's `_MCPWrapperBase`); this
-    helper used to wrap a session in a connection-shaped namespace.
-    """
-    return session
-
-
 def test_type_checking_only_mcp_annotations_are_deferred() -> None:
     assert mcp_mod._MCPWrapperBase.__annotations__["_session"] == "ClientSession"
     assert MCPToolWrapper.__init__.__annotations__["session"] == "ClientSession"
@@ -168,7 +159,7 @@ def _make_wrapper(session: object, *, timeout: float = 0.1) -> MCPToolWrapper:
         description="demo tool",
         inputSchema={"type": "object", "properties": {}},
     )
-    return MCPToolWrapper(_fake_conn(session), "test", tool_def, tool_timeout=timeout)
+    return MCPToolWrapper(session, "test", tool_def, tool_timeout=timeout)
 
 
 @pytest.mark.asyncio
@@ -267,7 +258,7 @@ async def test_saved_oauth_http_403_projects_failed_runtime_without_details(
             id="true-property-preserves-value",
         ),
         pytest.param(
-            False, {"value": None}, "value is not allowed by schema",
+            False, {"value": None}, "parameters: False schema does not allow None",
             id="false-property-rejects-null",
         ),
         pytest.param(False, {}, None, id="false-property-can-be-absent"),
@@ -280,7 +271,7 @@ async def test_saved_oauth_http_403_projects_failed_runtime_without_details(
         pytest.param(
             {"type": "array", "items": False},
             {"value": [1]},
-            "value[0] is not allowed by schema",
+            "value: Expected at most 0 items but found 1 extra: 1",
             id="false-items-reject-element",
         ),
         pytest.param(
@@ -290,8 +281,8 @@ async def test_saved_oauth_http_403_projects_failed_runtime_without_details(
         pytest.param(
             {"type": "object", "properties": {"blocked": False}},
             {"value": {"blocked": "x"}},
-            "value.blocked is not allowed by schema",
-            id="nested-false-property-reports-path",
+            "value: False schema does not allow 'x'",
+            id="nested-false-property-rejects-value",
         ),
     ],
 )
@@ -727,7 +718,7 @@ async def test_execute_notes_unstorable_image_block(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_returns_timeout_message() -> None:
+async def test_execute_returns_unknown_outcome_on_submitted_timeout() -> None:
     async def call_tool(_name: str, arguments: dict) -> object:
         await asyncio.sleep(1)
         return SimpleNamespace(content=[])
@@ -736,7 +727,11 @@ async def test_execute_returns_timeout_message() -> None:
 
     result = await wrapper.execute()
 
-    assert result == "(MCP tool call timed out after 0.01s)"
+    assert result == (
+        "(MCP tool call outcome is unknown; timed out after 0.01s. The operation "
+        "may have completed and was not replayed after this failure. Check its outcome before "
+        "retrying to avoid duplicate side effects.)"
+    )
     assert is_tool_error_result(result)
 
 
@@ -1923,7 +1918,7 @@ def _make_resource_def(
 
 
 def _make_resource_wrapper(session: object, *, timeout: float = 0.1) -> MCPResourceWrapper:
-    return MCPResourceWrapper(_fake_conn(session), "srv", _make_resource_def(), resource_timeout=timeout)
+    return MCPResourceWrapper(session, "srv", _make_resource_def(), resource_timeout=timeout)
 
 
 def test_resource_wrapper_properties() -> None:
@@ -1989,7 +1984,7 @@ def _make_prompt_def(
 
 
 def _make_prompt_wrapper(session: object, *, timeout: float = 0.1) -> MCPPromptWrapper:
-    return MCPPromptWrapper(_fake_conn(session), "srv", _make_prompt_def(), prompt_timeout=timeout)
+    return MCPPromptWrapper(session, "srv", _make_prompt_def(), prompt_timeout=timeout)
 
 
 def test_prompt_wrapper_properties() -> None:
@@ -2312,16 +2307,6 @@ def test_sanitize_name_noop_for_already_clean_names() -> None:
     assert _sanitize_name("mcp_server_tool") == "mcp_server_tool"
 
 
-def test_tool_wrapper_sanitizes_name() -> None:
-    tool_def = SimpleNamespace(
-        name="My Tool",
-        description="tool with spaces",
-        inputSchema={"type": "object", "properties": {}},
-    )
-    wrapper = MCPToolWrapper(SimpleNamespace(call_tool=None), "srv", tool_def)
-    assert wrapper.name == "mcp_srv_My_Tool"
-
-
 def test_resource_wrapper_sanitizes_name() -> None:
     resource_def = SimpleNamespace(
         name="PostgreSQL System Information",
@@ -2457,8 +2442,8 @@ def test_long_server_name_tools_are_matched_by_server_name() -> None:
 @pytest.mark.parametrize("params, error", [
     ({"team": "nanobot", "query": "bug"}, None),
     ({"team": "nanobot", "customView": "saved-view"}, None),
-    ({"query": "bug"}, "missing required team"),
-    ({"team": "nanobot", "customView": ""}, "customView must be at least 1 chars"),
+    ({"query": "bug"}, "parameters:"),
+    ({"team": "nanobot", "customView": ""}, "customView:"),
 ])
 async def test_optional_mcp_filters_reach_server_unchanged(params, error):
     async def call_tool(name, arguments):

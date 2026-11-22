@@ -17,7 +17,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ContextCompactionEvent, ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from nanobot.command.builtin import build_help_text
+from nanobot.command.application import build_help_text
 from nanobot.config.network import NetworkConfig
 from nanobot.config.paths import get_media_dir
 from nanobot.config_base import Base
@@ -204,9 +204,9 @@ if DISCORD_AVAILABLE:
             commands = (
                 ("new", "Stop current task and start a new conversation", "/new"),
                 ("stop", "Stop the current task", "/stop"),
+                ("cancel_goal", "Cancel the current goal", "/cancel_goal"),
                 ("restart", "Restart the bot", "/restart"),
                 ("status", "Show bot status", "/status"),
-                ("history", "Show recent conversation messages", "/history"),
             )
 
             for name, description, command_text in commands:
@@ -505,12 +505,12 @@ class DiscordChannel(BaseChannel):
             self.logger.exception("client startup failed")
         finally:
             self._running = False
-            await self._reset_runtime_state(close_client=True)
+            await self._reset_runtime_state()
 
     async def stop(self) -> None:
         """Stop the Discord channel."""
         self._running = False
-        await self._reset_runtime_state(close_client=True)
+        await self._reset_runtime_state()
 
     def _remember_compaction_notice(
         self,
@@ -638,7 +638,6 @@ class DiscordChannel(BaseChannel):
             return
         if self._is_system_message(message):
             return
-
 
         sender_id = str(message.author.id)
         channel_id = self._channel_key(message.channel)
@@ -928,7 +927,7 @@ class DiscordChannel(BaseChannel):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._working_emoji_tasks.clear()
 
-    async def _reset_runtime_state(self, close_client: bool) -> None:
+    async def _reset_runtime_state(self) -> None:
         self._running = False
         # Drain callbacks before clearing the state they can still create after an await.
         current = asyncio.current_task()
@@ -942,7 +941,7 @@ class DiscordChannel(BaseChannel):
         self._compaction_notices.clear()
         self._stream_bufs.clear()
         self._known_channels.clear()
-        if close_client and self._client is not None and not self._client.is_closed():
+        if self._client is not None and not self._client.is_closed():
             try:
                 await self._client.close()
             except Exception as e:

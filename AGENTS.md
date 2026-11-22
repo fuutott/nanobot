@@ -2,10 +2,13 @@
 
 The Python gateway owns agent execution, sessions, tools, memory, and security policy. WebUI and TUI share that runtime; keep execution and policy out of the clients.
 
+WebUI/gateway support and test coverage are limited to same-version combinations, including remote gateways. Cross-version combinations may work but have no compatibility guarantee, even when protocol checks pass; align versions first when troubleshooting. Do not reject connections solely because package versions differ, or add compatibility fallbacks or negotiation solely to support older gateways.
+
 ## Task-specific guidance
 
 | When working on | Read |
 | --- | --- |
+| Finding the owning code and focused tests | [`.agent/navigation.md`](.agent/navigation.md) |
 | Core boundaries, extensions, or internal types | [`.agent/design.md`](.agent/design.md) |
 | Refactoring, fallbacks, or test selection | [`.agent/simplify.md`](.agent/simplify.md) |
 | User-facing copy, feature naming, or localization | [`.agent/copywriting.md`](.agent/copywriting.md) |
@@ -171,7 +174,9 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 | `agent/subagent.py` | `provider_factory` + `available_providers` / `available_models`; `_override_runtime()` applied in `spawn` / `run_inline` before `_create_task`; knob fields (`system_prompt_override` / `tools_filter` / `skills_filter`) on upstream's `_SubagentTask` record, consumed in `_run_admitted_subagent` (`_build_tools(allowed_tools=…)`, `_build_subagent_prompt(skills_filter=…)`) | Per-subagent overrides composed inside upstream's record-based task lifecycle (#5985) |
 | `agent/tools/subagent.py` | `provider` / `model` / `system_prompt` / `tools` / `skills` params on `create`, forwarded to the manager | Surface the overrides to the agent |
 | `agent/tools/loader.py` | `allowed_tools` filter on `ToolLoader.load` | Tool whitelist for subagents |
-| `providers/routing.py`, `factory.py`, `registry.py`, `config/schema.py` | `stripHistoryReasoningContent` per-provider config field, passed into `create_dynamic_spec` for custom providers (routing.py) and into the `_preset_provider_signature` cache key | Cerebras 400-fix for custom providers. Upstream now has the spec-level flag natively (for Mistral) — only the config opt-in is ours |
+| `providers/routing.py`, `factory.py`, `registry.py`, `config/schema.py` | `stripHistoryReasoningContent` per-provider config field, passed into `create_dynamic_spec` for custom providers (routing.py) and into the `_preset_provider_signature` cache key, and into `ProviderSpec.for_connection()`'s `create_dynamic_spec` call (registry.py; legacy-custom-config built-ins like `shengsuanyun`) | Cerebras 400-fix for custom providers. Upstream now has the spec-level flag natively (for Mistral) — only the config opt-in is ours |
+| `providers/openai_compat_provider.py` | `_dump_llm_call()` + 4 call sites (chat / chat_stream / responses / responses_stream), gated by `NANOBOT_DUMP_LLM_CALLS=1`, dumps to `$NANOBOT_DUMP_LLM_DIR` (default `~/.nanobot/workspace/_llm_dumps`) | Debug aid: inspect exact outgoing request payloads |
+| `providers/openai_responses/parsing.py` + `tests/providers/test_openai_responses.py::TestOutputItemSerialization` | `_response_object` dumps with `model_dump(by_alias=True, exclude_none=True)` (upstream: bare `by_alias=True`) | Otherwise replayed reasoning items carry `status: null` and the Responses API rejects them (`Unknown parameter: 'input[N].status'`) |
 
 ### Channel hardening (pure additions / fixes upstream lacks)
 
@@ -186,14 +191,14 @@ AgentLoop into an `MCPProvider`; our pieces were re-composed to fit that shape.)
 | Area | What we keep | Why |
 |------|-------------|-----|
 | `config/loader.py` | Open config with `encoding="utf-8-sig"` | Tolerate UTF-8 BOM (Windows Notepad adds it) |
-| `cli/onboard.py` | `importlib.import_module(channel_cls.__module__)` instead of hardcoded `nanobot.channels.{name}` | Required to resolve channel configs for **plugin** channels (live in `nanobot_channel_*` packages) |
 | `pyproject.toml` | `fastapi`, `uvicorn`, `python-multipart` deps | Plugin channels (`nanobot-channel-{openaiapi,mcpserver}`) require them |
 | `pyproject.toml` (dev extra) | `virtualenv>=21.14.9,<22.0.0` instead of upstream's `<21` cap (also lifts filelock to 4.x in the dev venv) | Radar CVE floor for the local test venv; drop when upstream lifts its cap |
 | `Dockerfile` / `docker-compose.yml` / `docker-compose.standalone.yml` / `seccomp-bwrap.json` | bwrap-capable security settings (SYS_ADMIN + custom seccomp + no-new-privileges, see Docker deployment shape); node webui-builder stage + `COPY --from=webui-builder ... nanobot/web/dist/`; openaiapi/mcpserver plugin install + ports 18791/18793/8765; `NANOBOT_SKIP_WEBUI_BUILD=1` on pip installs (dist pre-built by the node stage) | Serve upstream's gateway WebUI on 8765; run the two remaining plugin channels |
-| `skills/memory/SKILL.md` | "When to Update MEMORY.md" + "Auto-consolidation" sections appended to upstream's (v0.3.5: history-search-only) skill body | Stronger guidance against `write_file`-ing MEMORY.md (which would destroy existing memory); upstream still points the agent at `memory/MEMORY.md` as long-term memory |
 
 ### Absorbed upstream (no longer local)
 
+- **`cli/onboard.py` plugin-channel config resolution** — upstream's `_get_channel_info` now uses `importlib.import_module(channel_cls.__module__)` itself (file identical to upstream as of the v0.4.2 sync).
+- **Memory skill guidance (`skills/memory/SKILL.md`)** — our appended "When to Update MEMORY.md" / "Auto-consolidation" sections were dropped in the v0.4.2 sync: upstream's #4477 (progressive wiki + Dream history drain) rewrote the skill with its own "Update Memory" section (read first, targeted in-place updates, Dream handles broader consolidation), which covers the same intent.
 - **Discord `group_policy="mention"` default** — used to be our fork's hard requirement; became the upstream default in v0.2.x. Nothing to preserve.
 - **`dream.interval_h=8` default** — dropped after upstream's Dream refactor (`d1a94dae` replaced two-phase Dream with simple cron + `process_direct`). Runtime config also reverted to upstream's 2h default; `maxBatchSize` and `maxIterations` are now deprecated fields.
 - **`MCPConnection` class + epoch-based reconnect** — dropped after upstream's `e9145b7a` / `d0eba7cd` added `_MCPWrapperBase` with `_refresh_session_after_termination` + `_attach_reconnect_handlers` + state-level `_reload_lock`. Upstream's coarser state-lock equivalently protects against thundering herd, and on session-terminated errors it tears down + rebuilds the whole server, swapping the live session into each wrapper. Only the OAuth token resolution remained local (now injected at the top of upstream's `connect_single_server`). `tests/agent/test_mcp_reconnect.py` deleted (its subject no longer exists).

@@ -34,7 +34,6 @@ from nanobot.channels.contracts import (
     resolve_channel_action_target,
 )
 from nanobot.channels.outbox import RETRY_SECONDS, DeliveryOutbox
-from nanobot.channels.registry import channel_default_enabled
 from nanobot.config.schema import Config
 from nanobot.security.workspace_access import WorkspaceScopeResolver
 from nanobot.security.workspace_policy import resolve_allowed_path
@@ -63,6 +62,7 @@ def _default_webui_dist() -> Path | None:
 _SEND_RETRY_DELAYS = (1, 2, 4)
 _OUTBOUND_CONCURRENCY = 32
 _OUTBOUND_PENDING_LIMIT = 256
+_OUTBOUND_BATCH_LIMIT = 32
 _RESTART_NOTICE_START_TIMEOUT_S = 30.0
 _RESTART_NOTICE_START_POLL_S = 0.25
 ORIGIN_REPLY_FINGERPRINTS_MAX_SIZE = 1000
@@ -152,6 +152,7 @@ class ChannelManager:
         self._restart_notice_task: asyncio.Task[None] | None = None
         self._outbound_tasks: dict[asyncio.Task[None], tuple[str, str]] = {}
         self._outbound_tails: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._outbound_batches: dict[tuple[str, str], list[OutboundMessage]] = {}
         self._outbound_pending: list[OutboundMessage] = []
         self._outbound_dispatching = False
         self._outbound_slots = asyncio.Semaphore(_OUTBOUND_PENDING_LIMIT)
@@ -172,14 +173,10 @@ class ChannelManager:
         self,
         name: str,
         *,
-        config: Config | None = None,
+        default_enabled: bool,
         default_sections: dict[str, Any] | None = None,
-        default_enabled: bool | None = None,
     ) -> Any:
-        config = config or self.config
-        section = getattr(config.channels, name, None)
-        if default_enabled is None:
-            default_enabled = channel_default_enabled(name)
+        section = getattr(self.config.channels, name, None)
         if section is not None or not default_enabled:
             return section
         if default_sections is None:
@@ -214,7 +211,6 @@ class ChannelManager:
                 static_dist_path=static_path,
                 workspace_path=workspace,
                 default_restrict_to_workspace=self.config.tools.restrict_to_workspace,
-                unified_session=self.config.agents.defaults.unified_session,
                 config_path=self._config_path,
                 disabled_skills=set(self.config.agents.defaults.disabled_skills),
                 runtime_model_name=self._webui_runtime_model_name,
@@ -776,9 +772,10 @@ class ChannelManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _queue_outbound(self, channel: BaseChannel, msg: OutboundMessage) -> None:
-        """Bound scheduled sends; preserve FIFO per destination, not across chats.
+        """Bound queued envelopes; preserve FIFO per destination, not across chats.
 
         Retry waits retain their destination tail and admission, not a send permit.
+        Only an unscheduled tail still waiting to start can accept a bounded batch.
         Saturation pauses dispatch rather than creating unbounded tasks or dropping messages.
         """
         if msg.delivery_id in self._scheduled_deliveries:
@@ -790,14 +787,35 @@ class ChannelManager:
             self._outbound_slots.release()
             return
         key = (msg.channel, msg.chat_id)
+        pending = self._outbound_batches.get(key)
+        if (
+            pending is not None
+            and msg.delivery_id is None
+            and len(pending) < _OUTBOUND_BATCH_LIMIT
+            and channel.can_batch_send(pending[-1], msg) is True
+        ):
+            pending.append(msg)
+            return
+
         previous = self._outbound_tails.get(key)
+        messages = [msg]
         if msg.delivery_id is not None:
             self._scheduled_deliveries.add(msg.delivery_id)
+            self._outbound_batches.pop(key, None)
+        else:
+            self._outbound_batches[key] = messages
 
         async def send() -> None:
             if previous is not None:
                 await asyncio.shield(asyncio.gather(previous, return_exceptions=True))
-            if msg.delivery_id is not None:
+            if self._outbound_batches.get(key) is messages:
+                self._outbound_batches.pop(key, None)
+            batch = tuple(messages)
+            if len(batch) > 1:
+                async with self._outbound_sends:
+                    # Partial delivery must never cause a blind replay of the batch.
+                    await channel.send_batch(batch)
+            elif msg.delivery_id is not None:
                 # Acquire before claiming: queued cancellation must remain pending.
                 async with self._outbound_sends:
                     await self._send_scheduled(channel, msg)
@@ -814,7 +832,10 @@ class ChannelManager:
                 self._scheduled_deliveries.discard(msg.delivery_id)
             if self._outbound_tails.get(key) is done:
                 self._outbound_tails.pop(key, None)
-            self._outbound_slots.release()
+            if self._outbound_batches.get(key) is messages:
+                self._outbound_batches.pop(key, None)
+            for _ in messages:
+                self._outbound_slots.release()
             if not done.cancelled() and (error := done.exception()) is not None:
                 logger.error("Outbound delivery to {}:{} failed: {}", *key, error)
 
