@@ -16,9 +16,11 @@ from pydantic import Field
 import uvicorn
 
 from nanobot.bus.events import OutboundMessage
+from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Base
+from nanobot.events import ContextCompactionEvent
 
 
 class OpenAIAPIConfig(Base):
@@ -49,6 +51,10 @@ class OpenAIAPIChannel(BaseChannel):
         self._app: FastAPI | None = None
         self._server: uvicorn.Server | None = None
         self._pending: dict[str, asyncio.Future[str]] = {}
+
+    def progress_transport_defaults(self) -> tuple[bool, bool]:
+        """An HTTP completion carries one final reply, not intermediate trace messages."""
+        return False, False
 
     async def start(self) -> None:
         """Start the OpenAI-compatible HTTP server."""
@@ -85,7 +91,14 @@ class OpenAIAPIChannel(BaseChannel):
             self._pending.pop(req_id, None)
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Resolve a pending HTTP request with outbound agent content."""
+        """Resolve a pending HTTP request with the turn's reply.
+
+        Progress, tool hints (enabled via ``sendProgress``/``sendToolHints``
+        overrides) and compaction notices are notifications, not the answer, so
+        they must not consume the request. The first reply resolves it.
+        """
+        if isinstance(msg.event, ProgressEvent | ContextCompactionEvent):
+            return
         request_id = str(msg.metadata.get("request_id", "")) if msg.metadata else ""
         if not request_id:
             logger.warning("openaiapi: outbound message missing request_id metadata")

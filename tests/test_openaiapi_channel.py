@@ -1,8 +1,12 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from nanobot_channel_openaiapi import OpenAIAPIChannel, OpenAIAPIConfig
+
+from nanobot.bus.events import OutboundMessage
+from nanobot.bus.outbound_events import ProgressEvent
 
 
 class _DummyBus:
@@ -136,3 +140,26 @@ def test_is_allowed_matches_host_alias() -> None:
     )
 
     assert channel.is_allowed("owner|http:10.0.0.5|10.0.0.5") is True
+
+
+async def test_tool_turn_resolves_request_with_final_reply_not_progress() -> None:
+    channel = _channel()
+    fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    channel._pending["req-1"] = fut
+    meta = {"request_id": "req-1"}
+
+    await channel.send(OutboundMessage(
+        "openaiapi", "c", "", metadata=meta, event=ProgressEvent(),
+    ))
+    await channel.send(OutboundMessage(
+        "openaiapi", "c", 'web_search("x")', metadata=meta,
+        event=ProgressEvent(tool_hint=True),
+    ))
+    assert not fut.done()
+
+    await channel.send(OutboundMessage("openaiapi", "c", "final answer", metadata=meta))
+    assert fut.result() == "final answer"
+
+
+def test_progress_and_tool_hints_are_off_by_default() -> None:
+    assert _channel().progress_transport_defaults() == (False, False)
